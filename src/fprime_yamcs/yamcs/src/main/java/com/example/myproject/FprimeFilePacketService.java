@@ -3,6 +3,9 @@ package com.example.myproject;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -58,6 +61,7 @@ import org.yamcs.protobuf.TransferState;
 import org.yamcs.yarch.protobuf.Db.Event;
 import org.yamcs.security.User;
 import org.yamcs.xtce.MetaCommand;
+import org.yamcs.xtce.SpaceSystem;
 import org.yamcs.tctm.Link;
 import org.yamcs.tctm.ccsds.TcPacketHandler;
 import org.yamcs.yarch.Stream;
@@ -156,6 +160,7 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
     private String inStreamName;
     private String bucketName;
     private int fileApid;
+    private Path downlinkMirrorDir;
 
     // Configuration — uplink
     private String uplinkLinkName;
@@ -287,6 +292,7 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
         spec.addOption("inStream", OptionType.STRING).withDefault("tm_realtime");
         spec.addOption("bucket", OptionType.STRING).withDefault("fprimeFilesIn");
         spec.addOption("fileApid", OptionType.INTEGER).withDefault(DEFAULT_FILE_APID);
+        spec.addOption("downlinkMirrorDir", OptionType.STRING).withDefault("/tmp/fprime-downlink");
         // Route uplink through the YAMCS-configured TC data link. The
         // service expects this link name to resolve to a TcPacketHandler
         // and fails to start otherwise.
@@ -295,17 +301,11 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
         // Downlink: qualified name of the F´ command that triggers a
         // FileDownlink on the spacecraft, plus the names of its source
         // and destination path arguments.
-        spec.addOption("fileDownlinkCommand", OptionType.STRING).withDefault(
-                "/FprimeYamcsReference|YamcsDeployment/FileHandling|fileDownlink|SendFile");
-        spec.addOption("sourceFileNameArg", OptionType.STRING).withDefault(
-                "FileHandling|fileDownlink|SendFile|sourceFileName");
-        spec.addOption("destFileNameArg", OptionType.STRING).withDefault(
-                "FileHandling|fileDownlink|SendFile|destFileName");
-        // Remote file listing: F´ FileManager.ListDirectory command.
-        spec.addOption("listDirectoryCommand", OptionType.STRING).withDefault(
-                "/FprimeYamcsReference|YamcsDeployment/FileHandling|fileManager|ListDirectory");
-        spec.addOption("listDirDirNameArg", OptionType.STRING).withDefault(
-                "FileHandling|fileManager|ListDirectory|dirName");
+        spec.addOption("fileDownlinkCommand", OptionType.STRING).withDefault("");
+        spec.addOption("sourceFileNameArg", OptionType.STRING).withDefault("sourceFileName");
+        spec.addOption("destFileNameArg", OptionType.STRING).withDefault("destFileName");
+        spec.addOption("listDirectoryCommand", OptionType.STRING).withDefault("");
+        spec.addOption("listDirDirNameArg", OptionType.STRING).withDefault("dirName");
         // How long to wait for F´ to emit a Start packet after we
         // synthesize a FileDownlink command before flipping the
         // pending transfer to FAILED. 30 seconds is generous for a
@@ -321,23 +321,19 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
         this.inStreamName = config.getString("inStream", "tm_realtime");
         this.bucketName = config.getString("bucket", "fprimeFilesIn");
         this.fileApid = config.getInt("fileApid", DEFAULT_FILE_APID);
+        this.downlinkMirrorDir = Paths.get(config.getString("downlinkMirrorDir", "/tmp/fprime-downlink"));
         this.uplinkLinkName = config.getString("uplinkLink", "UDP_TC_OUT.vc1");
         this.uplinkChunkSize = config.getInt("uplinkChunkSize", 128);
-        this.fileDownlinkCommandName = config.getString("fileDownlinkCommand",
-                "/FprimeYamcsReference|YamcsDeployment/FileHandling|fileDownlink|SendFile");
-        this.sourceFileNameArg = config.getString("sourceFileNameArg",
-                "FileHandling|fileDownlink|SendFile|sourceFileName");
-        this.destFileNameArg = config.getString("destFileNameArg",
-                "FileHandling|fileDownlink|SendFile|destFileName");
-        this.listDirectoryCommandName = config.getString("listDirectoryCommand",
-                "/FprimeYamcsReference|YamcsDeployment/FileHandling|fileManager|ListDirectory");
-        this.listDirDirNameArg = config.getString("listDirDirNameArg",
-                "FileHandling|fileManager|ListDirectory|dirName");
+        this.fileDownlinkCommandName = config.getString("fileDownlinkCommand", "");
+        this.sourceFileNameArg = config.getString("sourceFileNameArg", "sourceFileName");
+        this.destFileNameArg = config.getString("destFileNameArg", "destFileName");
+        this.listDirectoryCommandName = config.getString("listDirectoryCommand", "");
+        this.listDirDirNameArg = config.getString("listDirDirNameArg", "dirName");
         this.downloadTimeoutMs = config.getLong("downloadTimeoutMs", 30000L);
 
         LOG.info("FprimeFilePacketService init: inStream={} bucket={} fileApid={}"
-                + " uplinkLink={} chunk={}B",
-                inStreamName, bucketName, fileApid, uplinkLinkName, uplinkChunkSize);
+                + " uplinkLink={} chunk={}B downlinkMirror={}",
+                inStreamName, bucketName, fileApid, uplinkLinkName, uplinkChunkSize, downlinkMirrorDir);
     }
 
     // ----------------------------------------------------------------------
@@ -479,6 +475,10 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
             Event evt = (Event) body;
             String type = evt.getType();
             if (type == null) return;
+            int dot = type.lastIndexOf('.');
+            if (dot >= 0) {
+                type = type.substring(dot + 1);
+            }
 
             // Prefer the structured `extra` map if fprime-yamcs-events
             // populated it (patched version >= fprime-community/fprime-yamcs#PR).
@@ -714,6 +714,21 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
             if (processor != null) {
                 this.commandingManager = processor.getCommandingManager();
                 this.commandHistoryPublisher = processor.getCommandHistoryPublisher();
+
+                if (fileDownlinkCommandName.isEmpty() || listDirectoryCommandName.isEmpty()) {
+                    for (MetaCommand cmd : processor.getMdb().getMetaCommands()) {
+                        String qn = cmd.getQualifiedName();
+                        if (fileDownlinkCommandName.isEmpty() && qn.endsWith("SendFile")) {
+                            fileDownlinkCommandName = qn;
+                        }
+                        if (listDirectoryCommandName.isEmpty() && qn.endsWith("ListDirectory")) {
+                            listDirectoryCommandName = qn;
+                        }
+                    }
+                    LOG.info("Auto-discovered commands: downlink={}, listing={}",
+                            fileDownlinkCommandName, listDirectoryCommandName);
+                }
+
                 this.fileDownlinkCommand = processor.getMdb().getMetaCommand(fileDownlinkCommandName);
                 this.listDirectoryCommand = processor.getMdb().getMetaCommand(listDirectoryCommandName);
                 this.systemUser = YamcsServer.getServer().getSecurityStore().getSystemUser();
@@ -994,6 +1009,16 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
                     Map.of(), inflight.reassemblyBuffer).join();
             LOG.info("File transfer COMPLETE: {} ({} bytes) -> bucket {}",
                     objectName, inflight.bytesReceived, bucketName);
+
+            try {
+                Files.createDirectories(downlinkMirrorDir);
+                Path mirrorPath = downlinkMirrorDir.resolve(objectName);
+                Files.write(mirrorPath, inflight.reassemblyBuffer);
+                LOG.info("Mirrored downlink file to {}", mirrorPath);
+            } catch (IOException e) {
+                LOG.warn("Failed to mirror file to {}: {}", downlinkMirrorDir, e.getMessage());
+            }
+
             if (inflight.apiTransfer != null) {
                 inflight.apiTransfer.setTransferredSize(inflight.bytesReceived);
                 inflight.apiTransfer.setState(TransferState.COMPLETED);
@@ -1183,7 +1208,7 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
             notifyStateChanged(transfer);
             publishVerifierAck(transfer, AckStatus.NOK,
                     "command dispatch failed: " + e.getMessage());
-            throw new IOException("Failed to dispatch downlink command", e);
+            throw new IOException("Failed to dispatch downlink command: " + e.getMessage(), e);
         }
 
         return transfer;

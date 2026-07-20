@@ -46,7 +46,7 @@ class YamcsParser(ParserBase):
         return {
             ("--yamcs-config-dir",): {
                 "action": "store",
-                "default": files("fprime_yamcs").joinpath("yamcs/src/main/yamcs"),
+                "default": Path(__file__).resolve().parent / "yamcs" / "src" / "main" / "yamcs",
                 "type": Path,
                 "help": "Specify the YAMCS configuration directory. Default: %(default)s",
             },
@@ -160,7 +160,7 @@ def get_dictionary_constants(dictionary: Path, constants: List[str]) -> str:
     Returns:
         a list of constants found in the dictionary that match the supplied list of constant names
     """
-    with dictionary.open() as f:
+    with open(str(dictionary)) as f:
         dictionary_data = json.load(f)
         constants_data = dictionary_data.get("constants", [])
     found_constants = [
@@ -169,6 +169,7 @@ def get_dictionary_constants(dictionary: Path, constants: List[str]) -> str:
     if len(found_constants) != len(constants):
         raise ValueError(f"Required constants {constants} not found in dictionary")
     return found_constants
+
 
 
 def construct_temporary_configuration(config_directory: Path, instances: List[str], dictionary: Path, uplink_port: int, downlink_port: int) -> Tuple[Path, str]:
@@ -240,7 +241,7 @@ def launch_yamcs(parsed_args):
 
     # Switch to the YAMCS directory and launch YAMCS using Maven
     return launch_process(
-        ["mvn", "-f", str(files("fprime_yamcs").joinpath("yamcs/pom.xml")), "yamcs:run",
+        ["mvn", "-f", str(Path(__file__).resolve().parent / "yamcs" / "pom.xml"), "yamcs:run",
          f"-Dyamcs.configurationDirectory={parsed_args.yamcs_config_dir.absolute()}",
          f"-Dyamcs.directory={parsed_args.yamcs_data_dir.absolute()}"
         ],
