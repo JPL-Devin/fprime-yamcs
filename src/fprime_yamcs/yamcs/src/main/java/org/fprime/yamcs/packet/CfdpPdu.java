@@ -147,20 +147,23 @@ public final class CfdpPdu {
     }
 
     public static Metadata decodeMetadata(byte[] bytes, Header header) {
+        // Confine every read to the header-declared data field so trailing
+        // buffer padding is never silently parsed as PDU content.
+        int end = header.dataOffset + header.dataFieldLength;
         int p = header.dataOffset + 1; // skip directive code
-        require(bytes.length - p >= 5, "Metadata PDU truncated");
+        require(end - p >= 5, "Metadata PDU truncated");
         // Byte after the directive code: closure requested + checksum type;
         // both are informational for the class-1 modular-checksum subset.
         int fileSize = ByteBuffer.wrap(bytes).getInt(p + 1);
         int srcLenOffset = p + 5;
-        require(bytes.length - srcLenOffset >= 1, "Metadata source LV truncated");
+        require(end - srcLenOffset >= 1, "Metadata source LV truncated");
         int srcLen = bytes[srcLenOffset] & 0xFF;
-        require(bytes.length - (srcLenOffset + 1) >= srcLen + 1,
+        require(end - (srcLenOffset + 1) >= srcLen + 1,
                 "Metadata source file name truncated");
         String src = new String(bytes, srcLenOffset + 1, srcLen, StandardCharsets.US_ASCII);
         int dstLenOffset = srcLenOffset + 1 + srcLen;
         int dstLen = bytes[dstLenOffset] & 0xFF;
-        require(bytes.length - (dstLenOffset + 1) >= dstLen,
+        require(end - (dstLenOffset + 1) >= dstLen,
                 "Metadata destination file name truncated");
         String dst = new String(bytes, dstLenOffset + 1, dstLen, StandardCharsets.US_ASCII);
         return new Metadata(fileSize, src, dst);
@@ -259,6 +262,15 @@ public final class CfdpPdu {
         // no segmentation control, 1-byte entity ids, no segment metadata,
         // 2-byte sequence number
         bb.put((byte) ((0 << 4) | 1));
+        if (sourceEntityId < 0 || sourceEntityId > 0xFF
+                || destinationEntityId < 0 || destinationEntityId > 0xFF) {
+            throw new IllegalArgumentException("entity ids " + sourceEntityId + "/"
+                    + destinationEntityId + " outside [0, 255]");
+        }
+        if (transactionSeq < 0 || transactionSeq > 0xFFFF) {
+            throw new IllegalArgumentException(
+                    "transaction sequence " + transactionSeq + " outside [0, 65535]");
+        }
         bb.put((byte) sourceEntityId);
         bb.putShort((short) transactionSeq);
         bb.put((byte) destinationEntityId);

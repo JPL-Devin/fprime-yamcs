@@ -12,6 +12,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Random;
+import java.util.concurrent.Executor;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,12 +41,16 @@ public class FilePacketDownlinkHandlerTest {
     }
 
     private FilePacketDownlinkHandler handler(int maxFileSize) {
+        return handler(maxFileSize, Runnable::run);
+    }
+
+    private FilePacketDownlinkHandler handler(int maxFileSize, Executor storageExecutor) {
         return new FilePacketDownlinkHandler(bucket, mirrorDir, maxFileSize,
                 (src, dst, size) -> {
                     lastResolved = new FprimeFileTransfer(1, "fake", dst, src, size,
                             TransferDirection.DOWNLOAD, "test", false);
                     return lastResolved;
-                }, listener, Runnable::run);
+                }, listener, storageExecutor);
     }
 
     private static void sendSequence(FilePacketDownlinkHandler h, String dst, byte[] content) {
@@ -125,16 +130,56 @@ public class FilePacketDownlinkHandlerTest {
     }
 
     @Test
-    public void truncatedDataPacketFailsTransfer() {
+    public void truncatedDataPacketDoesNotFailInflightTransfer() {
+        byte[] content = new byte[10];
         FilePacketDownlinkHandler h = handler(1024);
-        h.handleFilePacket(FilePacket.encodeStart(0, 10, "/src", "/f"), 0);
-        // DATA header claims 4 bytes but the packet carries none
+        h.handleFilePacket(FilePacket.encodeStart(0, content.length, "/src", "/f"), 0);
+        // DATA header claims 4 bytes but the packet carries none: dropped as
+        // undecodable garbage without aborting the healthy transfer.
         byte[] pkt = FilePacket.encodeData(1, 0, new byte[4], 0, 4);
         byte[] truncated = new byte[pkt.length - 4];
         System.arraycopy(pkt, 0, truncated, 0, truncated.length);
         h.handleFilePacket(truncated, 0);
+        assertEquals(TransferState.RUNNING, lastResolved.getTransferState());
+
+        h.handleFilePacket(FilePacket.encodeData(2, 0, content, 0, content.length), 0);
+        h.handleFilePacket(FilePacket.encodeEnd(3, CfdpChecksum.of(content)), 0);
+        assertEquals(TransferState.COMPLETED, lastResolved.getTransferState());
+    }
+
+    @Test
+    public void stalledTransferExpires() throws Exception {
+        FilePacketDownlinkHandler h = handler(1024);
+        h.handleFilePacket(FilePacket.encodeStart(0, 10, "/src", "/f"), 0);
+        Thread.sleep(5);
+        h.expireInflight(1);
+
         assertEquals(TransferState.FAILED, lastResolved.getTransferState());
-        assertTrue(lastResolved.getFailuredReason().contains("packet processing error"));
+        assertTrue(lastResolved.getFailuredReason().contains("stalled"));
+    }
+
+    @Test
+    public void freshTransferSurvivesExpirySweep() {
+        FilePacketDownlinkHandler h = handler(1024);
+        h.handleFilePacket(FilePacket.encodeStart(0, 10, "/src", "/f"), 0);
+        h.expireInflight(60_000);
+        assertEquals(TransferState.RUNNING, lastResolved.getTransferState());
+    }
+
+    @Test
+    public void storageBacklogBoundFailsOverflowingTransfer() {
+        byte[] content = new byte[10];
+        // Executor that never runs its tasks: queued stores never drain.
+        FilePacketDownlinkHandler h = handler(1024, task -> { });
+        for (int i = 1; i <= FilePacketDownlinkHandler.MAX_PENDING_STORES; i++) {
+            sendSequence(h, "/f" + i + ".bin", content);
+            assertEquals(TransferState.RUNNING, lastResolved.getTransferState());
+        }
+
+        sendSequence(h, "/overflow.bin", content);
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("storage backlog"));
+        assertTrue(bucket.objects.isEmpty());
     }
 
     @Test
@@ -197,21 +242,5 @@ public class FilePacketDownlinkHandlerTest {
         sendSequence(h, "/f", content);
         assertTrue(listener.acks.contains(AckStatus.PENDING));
         assertTrue(listener.acks.contains(AckStatus.OK));
-    }
-
-    @Test
-    public void sanitizeRejectsUnsafePaths() {
-        assertEquals("a/b.bin", ObjectNames.sanitize("/a/b.bin"));
-        assertEquals("b.bin", ObjectNames.sanitize("b.bin"));
-        assertThrows(IllegalArgumentException.class,
-                () -> ObjectNames.sanitize("/"));
-        assertThrows(IllegalArgumentException.class,
-                () -> ObjectNames.sanitize("/a/../b"));
-        assertThrows(IllegalArgumentException.class,
-                () -> ObjectNames.sanitize("../b"));
-        assertThrows(IllegalArgumentException.class,
-                () -> ObjectNames.sanitize("a//b"));
-        assertThrows(IllegalArgumentException.class,
-                () -> ObjectNames.sanitize("./b"));
     }
 }

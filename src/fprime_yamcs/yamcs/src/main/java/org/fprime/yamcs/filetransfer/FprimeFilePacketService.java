@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -99,6 +100,10 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
     private static final int DEFAULT_FILE_APID = 3;
 
     private static final String TRANSFER_TYPE = "FwFilePacket";
+
+    // A reassembly with no packet activity for this long is failed by the
+    // sweeper, releasing its buffer.
+    private static final long INFLIGHT_STALL_TIMEOUT_MS = 60_000;
 
     // Configuration
     private String inStreamName;
@@ -200,6 +205,10 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         this.listDirectoryCommandName = config.getString("listDirectoryCommand", "");
         this.listDirDirNameArg = config.getString("listDirDirNameArg", "dirName");
         this.downloadTimeoutMs = config.getLong("downloadTimeoutMs", 30000L);
+        if (fileApid < 0 || fileApid > SpacePacket.MAX_APID) {
+            throw new InitException("fileApid " + fileApid + " outside [0, "
+                    + SpacePacket.MAX_APID + "]");
+        }
 
         log.info("FprimeFilePacketService init: inStream={} bucket={} fileApid={}"
                 + " uplinkLink={} chunk={}B downlinkMirror={}",
@@ -320,6 +329,11 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         if (eventsStream != null && eventsSubscriber != null) {
             eventsStream.removeSubscriber(eventsSubscriber);
         }
+        // No packets or uplink work can progress after the executors stop;
+        // flip every remaining non-terminal transfer to FAILED so nothing
+        // stays QUEUED/RUNNING forever.
+        pendingDownloadsByPath.clear();
+        failNonTerminalTransfers("service stopped");
         notifyStopped();
     }
 
@@ -344,6 +358,12 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         if (!FilePacket.isFilePacket(bytes, SpacePacket.PRIMARY_HEADER_LEN)) {
             log.warn("Got APID {} but unexpected packet descriptor", fileApid);
             return;
+        }
+        // Trim trailing padding beyond the CCSDS-declared length so it can
+        // never be parsed as packet content.
+        int declared = SpacePacket.declaredLength(bytes);
+        if (bytes.length > declared) {
+            bytes = Arrays.copyOf(bytes, declared);
         }
         downlinkHandler.handleFilePacket(bytes, SpacePacket.PRIMARY_HEADER_LEN);
     }
@@ -388,6 +408,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
      */
     private void sweepPendingDownloadTimeouts() {
         listingHandler.expireStaleListings();
+        downlinkHandler.expireInflight(INFLIGHT_STALL_TIMEOUT_MS);
         long now = System.currentTimeMillis();
         for (Map.Entry<String, FprimeFileTransfer> entry :
                 new ArrayList<>(pendingDownloadsByPath.entrySet())) {

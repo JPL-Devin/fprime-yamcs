@@ -1,5 +1,7 @@
 package org.fprime.yamcs.filetransfer;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yamcs.protobuf.TransferState;
@@ -33,7 +35,8 @@ public class FilePacketUplinkHandler {
     // postprocessor (e.g. FprimeCommandPostprocessor with CcsdsSeqCountFiller)
     // may re-patch this in place on links that have one configured; setting a
     // real count here keeps raw links without a postprocessor coherent too.
-    private int seqCount = 0;
+    // Atomic so the handler is safe regardless of which executor runs it.
+    private final AtomicInteger seqCount = new AtomicInteger();
 
     public FilePacketUplinkHandler(UplinkTransport transport, int fileApid, int chunkSize,
                                    TransferEventListener listener) {
@@ -100,7 +103,7 @@ public class FilePacketUplinkHandler {
     }
 
     private void send(byte[] filePacket) throws Exception {
-        transport.send(SpacePacket.wrapTelecommand(filePacket, fileApid, seqCount));
-        seqCount = (seqCount + 1) & 0x3FFF;
+        int seq = seqCount.getAndUpdate(s -> (s + 1) & 0x3FFF);
+        transport.send(SpacePacket.wrapTelecommand(filePacket, fileApid, seq));
     }
 }

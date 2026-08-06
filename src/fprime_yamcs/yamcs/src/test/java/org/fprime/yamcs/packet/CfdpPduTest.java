@@ -92,6 +92,40 @@ public class CfdpPduTest {
     }
 
     @Test
+    public void entityIdAndSequenceBoundsEnforced() {
+        assertThrows(IllegalArgumentException.class,
+                () -> CfdpPdu.encodeMetadata(-1, 2, 0, 10, "a", "b"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CfdpPdu.encodeMetadata(256, 2, 0, 10, "a", "b"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CfdpPdu.encodeMetadata(1, 256, 0, 10, "a", "b"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CfdpPdu.encodeMetadata(1, 2, -1, 10, "a", "b"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CfdpPdu.encodeMetadata(1, 2, 0x10000, 10, "a", "b"));
+        // Boundary values round-trip
+        byte[] pdu = CfdpPdu.encodeMetadata(255, 255, 0xFFFF, 10, "a", "b");
+        CfdpPdu.Header h = CfdpPdu.decodeHeader(pdu, 0);
+        assertEquals(255, h.sourceEntityId);
+        assertEquals(255, h.destinationEntityId);
+        assertEquals(0xFFFF, h.transactionSeq);
+    }
+
+    @Test
+    public void metadataDecodingConfinedToDataFieldLength() {
+        byte[] md = CfdpPdu.encodeMetadata(1, 2, 0, 10, "abc", "def");
+        // Trailing padding after the declared data field must not satisfy
+        // the LV reads when the declared length cuts the names short.
+        byte[] padded = Arrays.copyOf(md, md.length + 8);
+        int declared = ((md[1] & 0xFF) << 8) | (md[2] & 0xFF);
+        int shortened = declared - 4;
+        padded[1] = (byte) (shortened >> 8);
+        padded[2] = (byte) shortened;
+        CfdpPdu.Header h = CfdpPdu.decodeHeader(padded, 0);
+        assertThrows(IllegalArgumentException.class, () -> CfdpPdu.decodeMetadata(padded, h));
+    }
+
+    @Test
     public void encodedPdusAreUnacknowledgedClass1() {
         byte[] pdu = CfdpPdu.encodeMetadata(1, 2, 0, 10, "a", "b");
         CfdpPdu.Header h = CfdpPdu.decodeHeader(pdu, 0);

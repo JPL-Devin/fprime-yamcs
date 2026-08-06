@@ -1,5 +1,7 @@
 package org.fprime.yamcs.filetransfer;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yamcs.protobuf.TransferState;
@@ -33,8 +35,9 @@ public class CfdpUplinkHandler {
     private final TransferEventListener listener;
     // CFDP transaction sequence number (16-bit, wraps) and CCSDS sequence
     // count (14-bit, wraps; may be re-patched by a link postprocessor).
-    private int transactionSeq = 0;
-    private int seqCount = 0;
+    // Atomic so the handler is safe regardless of which executor runs it.
+    private final AtomicInteger transactionSeq = new AtomicInteger();
+    private final AtomicInteger seqCount = new AtomicInteger();
 
     public CfdpUplinkHandler(UplinkTransport transport, int cfdpApid, int chunkSize,
                              int localEntityId, int remoteEntityId,
@@ -99,14 +102,12 @@ public class CfdpUplinkHandler {
         }
     }
 
-    private synchronized int nextTransactionSeq() {
-        int seq = transactionSeq;
-        transactionSeq = (transactionSeq + 1) & 0xFFFF;
-        return seq;
+    private int nextTransactionSeq() {
+        return transactionSeq.getAndUpdate(s -> (s + 1) & 0xFFFF);
     }
 
     private void send(byte[] pdu) throws Exception {
-        transport.send(SpacePacket.wrapTelecommand(pdu, cfdpApid, seqCount));
-        seqCount = (seqCount + 1) & 0x3FFF;
+        int seq = seqCount.getAndUpdate(s -> (s + 1) & 0x3FFF);
+        transport.send(SpacePacket.wrapTelecommand(pdu, cfdpApid, seq));
     }
 }

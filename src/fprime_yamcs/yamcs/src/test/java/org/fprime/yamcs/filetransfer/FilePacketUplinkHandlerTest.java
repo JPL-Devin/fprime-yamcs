@@ -1,6 +1,7 @@
 package org.fprime.yamcs.filetransfer;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -9,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.Test;
 import org.yamcs.protobuf.TransferDirection;
@@ -88,13 +90,16 @@ public class FilePacketUplinkHandlerTest {
         }, APID, 100, new RecordingListener());
         FprimeFileTransfer t = transfer(10);
 
+        AtomicBoolean flagRestored = new AtomicBoolean();
         Thread worker = new Thread(() -> {
             h.run(t, new byte[10]);
-            assertTrue(Thread.currentThread().isInterrupted());
+            flagRestored.set(Thread.currentThread().isInterrupted());
         });
         worker.start();
         worker.join(5000);
 
+        assertFalse(worker.isAlive());
+        assertTrue(flagRestored.get());
         assertEquals(TransferState.FAILED, t.getTransferState());
         assertEquals("interrupted", t.getFailuredReason());
     }

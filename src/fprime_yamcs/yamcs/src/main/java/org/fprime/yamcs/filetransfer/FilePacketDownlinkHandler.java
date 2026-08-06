@@ -5,6 +5,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +31,13 @@ public class FilePacketDownlinkHandler {
     private static final Logger LOG = LoggerFactory.getLogger(FilePacketDownlinkHandler.class);
 
     /**
+     * Maximum completed reassemblies awaiting storage. Bounds the memory a
+     * fast (or spoofed) TM stream can pin in queued reassembly buffers when
+     * bucket writes are slower than downlinks complete.
+     */
+    static final int MAX_PENDING_STORES = 4;
+
+    /**
      * Supplies the API-level transfer record to attach to a newly started
      * downlink — either a pending {@code startDownload()} transfer keyed by
      * destination path, or a freshly created record for unsolicited
@@ -45,9 +54,11 @@ public class FilePacketDownlinkHandler {
     private final int maxFileSize;
     private final Executor storageExecutor;
 
-    // In-flight downlink reassembly. Null means idle. Only touched from the
-    // TM stream subscriber thread.
+    // In-flight downlink reassembly. Null means idle. Guarded by the
+    // handler's monitor (all packet entry points are synchronized).
     private Reassembly inflight;
+    private long inflightLastActivity;
+    private final AtomicInteger pendingStores = new AtomicInteger();
 
     private static final class Reassembly {
         final String sourcePath;
@@ -98,7 +109,7 @@ public class FilePacketDownlinkHandler {
      * Process one descriptor-prefixed {@code Fw::FilePacket} found at
      * {@code offset} within {@code bytes}.
      */
-    public void handleFilePacket(byte[] bytes, int offset) {
+    public synchronized void handleFilePacket(byte[] bytes, int offset) {
         try {
             FilePacket.Header header = FilePacket.decodeHeader(bytes, offset);
             if (header.type == null) {
@@ -121,8 +132,24 @@ public class FilePacketDownlinkHandler {
                     break;
             }
         } catch (Exception e) {
-            LOG.error("Error processing FilePacket", e);
-            failInflight("packet processing error: " + e.getMessage());
+            // Drop undecodable packets rather than failing the in-flight
+            // transfer: garbage on the file APID must not abort an unrelated
+            // healthy transfer. A dead transfer is reclaimed by the
+            // expireInflight sweeper.
+            LOG.error("Dropping undecodable FilePacket: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Fail the in-flight transfer if no packet for it has arrived within
+     * {@code maxAgeMs}. Called periodically by the owning service so a START
+     * never followed by END/CANCEL cannot pin its reassembly buffer forever.
+     */
+    public synchronized void expireInflight(long maxAgeMs) {
+        if (inflight != null && System.currentTimeMillis() - inflightLastActivity > maxAgeMs) {
+            LOG.warn("File transfer of {} stalled for over {} ms; failing",
+                    inflight.destinationPath, maxAgeMs);
+            failInflight("transfer stalled: no packet received within " + maxAgeMs + " ms");
         }
     }
 
@@ -133,7 +160,8 @@ public class FilePacketDownlinkHandler {
         }
         FilePacket.StartPayload start = FilePacket.decodeStart(bytes, header.payloadOffset);
         LOG.info("File transfer START: seq={} size={} src={} dst={}",
-                header.sequenceIndex, start.fileSize, start.sourcePath, start.destinationPath);
+                header.sequenceIndex, start.fileSize,
+                ObjectNames.forLog(start.sourcePath), ObjectNames.forLog(start.destinationPath));
         if (start.fileSize < 0 || start.fileSize > maxFileSize) {
             LOG.error("START declares file size {} outside [0, {}]; rejecting",
                     start.fileSize, maxFileSize);
@@ -156,6 +184,7 @@ public class FilePacketDownlinkHandler {
                 start.sourcePath, start.destinationPath, start.fileSize);
         transfer.setState(TransferState.RUNNING);
         inflight = new Reassembly(start.sourcePath, start.destinationPath, start.fileSize, transfer);
+        inflightLastActivity = System.currentTimeMillis();
         listener.stateChanged(transfer);
         listener.verifierAck(transfer, AckStatus.PENDING,
                 String.format("receiving %d bytes from %s", start.fileSize, start.sourcePath));
@@ -177,6 +206,7 @@ public class FilePacketDownlinkHandler {
             return;
         }
         System.arraycopy(bytes, data.dataStart, inflight.buffer, data.byteOffset, data.dataSize);
+        inflightLastActivity = System.currentTimeMillis();
         // Clamp: duplicate or overlapping DATA offsets must not inflate the
         // reported progress past the declared file size.
         inflight.bytesReceived = (int) Math.min((long) inflight.declaredSize,
@@ -209,16 +239,39 @@ public class FilePacketDownlinkHandler {
             objectName = ObjectNames.sanitize(inflight.destinationPath);
         } catch (IllegalArgumentException e) {
             LOG.error("Rejecting unsafe destination path '{}': {}",
-                    inflight.destinationPath, e.getMessage());
+                    ObjectNames.forLog(inflight.destinationPath), e.getMessage());
             failInflight("unsafe destination path: " + e.getMessage());
             return;
         }
         // Hand storage off so blocking bucket/mirror I/O never stalls the TM
         // stream subscriber thread. Clear the in-flight slot first: the
         // reassembly is complete and the next START may arrive immediately.
+        // Bound the storage backlog so a fast TM stream cannot pin unbounded
+        // memory in queued reassembly buffers.
+        if (pendingStores.get() >= MAX_PENDING_STORES) {
+            failInflight("storage backlog: " + MAX_PENDING_STORES
+                    + " completed transfers already awaiting bucket writes");
+            return;
+        }
         Reassembly completed = inflight;
         inflight = null;
-        storageExecutor.execute(() -> store(completed, objectName));
+        pendingStores.incrementAndGet();
+        try {
+            storageExecutor.execute(() -> {
+                try {
+                    store(completed, objectName);
+                } finally {
+                    pendingStores.decrementAndGet();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            pendingStores.decrementAndGet();
+            String reason = "storage executor rejected write: " + e.getMessage();
+            completed.transfer.setFailureReason(reason);
+            completed.transfer.setState(TransferState.FAILED);
+            listener.stateChanged(completed.transfer);
+            listener.verifierAck(completed.transfer, AckStatus.NOK, reason);
+        }
     }
 
     private void store(Reassembly completed, String objectName) {

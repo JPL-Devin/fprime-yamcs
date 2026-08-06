@@ -48,4 +48,33 @@ public class SpacePacketTest {
         assertEquals(0xFF, pkt[4] & 0xFF);
         assertEquals(0xFF, pkt[5] & 0xFF);
     }
+
+    @Test
+    public void apidBoundsEnforced() {
+        assertThrows(IllegalArgumentException.class,
+                () -> SpacePacket.wrapTelecommand(new byte[] { 1 }, -1, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> SpacePacket.wrapTelecommand(new byte[] { 1 }, SpacePacket.MAX_APID + 1, 0));
+        byte[] pkt = SpacePacket.wrapTelecommand(new byte[] { 1 }, SpacePacket.MAX_APID, 0);
+        assertEquals(SpacePacket.MAX_APID, SpacePacket.apid(pkt));
+    }
+
+    @Test
+    public void headerAccessorsRejectShortPackets() {
+        byte[] shortPkt = new byte[SpacePacket.PRIMARY_HEADER_LEN - 1];
+        assertThrows(IllegalArgumentException.class, () -> SpacePacket.apid(shortPkt));
+        assertThrows(IllegalArgumentException.class,
+                () -> SpacePacket.packetIdAndSequence(shortPkt));
+        assertThrows(IllegalArgumentException.class,
+                () -> SpacePacket.declaredLength(shortPkt));
+    }
+
+    @Test
+    public void declaredLengthUsesMinusOneConvention() {
+        byte[] pkt = SpacePacket.wrapTelecommand(new byte[] { 9, 8, 7 }, 3, 5);
+        assertEquals(pkt.length, SpacePacket.declaredLength(pkt));
+        // Trailing padding is not counted
+        byte[] padded = Arrays.copyOf(pkt, pkt.length + 4);
+        assertEquals(pkt.length, SpacePacket.declaredLength(padded));
+    }
 }

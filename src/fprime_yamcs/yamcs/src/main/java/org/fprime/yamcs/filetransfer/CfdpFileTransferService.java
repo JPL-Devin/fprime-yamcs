@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -73,7 +74,18 @@ import org.fprime.yamcs.packet.SpacePacket;
  *       downlinkMirrorDir: /tmp/fprime-downlink  # local mirror (default)
  *       maxFileSize: 268435456         # downlink allocation cap in bytes
  *       fileDownlinkCommand: ""        # optional F´ command for startDownload
+ *       sourceFileNameArg: sourceFileName  # downlink-command source-path argument name
+ *       destFileNameArg: destFileName      # downlink-command destination-path argument name
+ *       downloadTimeoutMs: 30000       # max wait for the spacecraft Metadata PDU
  * </pre>
+ *
+ * <p>Design note: this service deliberately does not reuse the built-in
+ * {@code org.yamcs.cfdp.CfdpService}, which expects raw CFDP PDUs on
+ * dedicated {@code cfdp_in}/{@code cfdp_out} streams. Here PDUs are
+ * encapsulated in CCSDS space packets on a configurable APID and travel
+ * through the ordinary F´ TM/TC pipelines (or a raw space-packet link) via
+ * the shared {@link UplinkTransport}, so the F´ and CFDP services share one
+ * uplink/downlink infrastructure.
  */
 public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         implements StreamSubscriber {
@@ -84,6 +96,10 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
     private static final int DEFAULT_CFDP_APID = 5;
 
     private static final String TRANSFER_TYPE = "CFDP";
+
+    // A reassembly with no PDU activity for this long is failed by the
+    // sweeper, releasing its buffer.
+    private static final long INFLIGHT_STALL_TIMEOUT_MS = 60_000;
 
     // Configuration
     private String inStreamName;
@@ -165,6 +181,10 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         this.sourceFileNameArg = config.getString("sourceFileNameArg", "sourceFileName");
         this.destFileNameArg = config.getString("destFileNameArg", "destFileName");
         this.downloadTimeoutMs = config.getLong("downloadTimeoutMs", 30000L);
+        if (cfdpApid < 0 || cfdpApid > SpacePacket.MAX_APID) {
+            throw new InitException("cfdpApid " + cfdpApid + " outside [0, "
+                    + SpacePacket.MAX_APID + "]");
+        }
 
         log.info("CfdpFileTransferService init: inStream={} bucket={} cfdpApid={}"
                 + " entities={}->{} uplinkLink={} chunk={}B downlinkMirror={}",
@@ -260,6 +280,11 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         if (inStream != null) {
             inStream.removeSubscriber(this);
         }
+        // No packets or uplink work can progress after the executors stop;
+        // flip every remaining non-terminal transfer to FAILED so nothing
+        // stays QUEUED/RUNNING forever.
+        pendingDownloadsByPath.clear();
+        failNonTerminalTransfers("service stopped");
         notifyStopped();
     }
 
@@ -279,6 +304,12 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         }
         if (SpacePacket.apid(bytes) != cfdpApid) {
             return;  // Not a CFDP packet.
+        }
+        // Trim trailing padding beyond the CCSDS-declared length so it can
+        // never be parsed as PDU content.
+        int declared = SpacePacket.declaredLength(bytes);
+        if (bytes.length > declared) {
+            bytes = Arrays.copyOf(bytes, declared);
         }
         downlinkHandler.handlePdu(bytes, SpacePacket.PRIMARY_HEADER_LEN);
     }
@@ -317,6 +348,7 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
      * Metadata PDU" case.
      */
     private void sweepPendingDownloadTimeouts() {
+        downlinkHandler.expireInflight(INFLIGHT_STALL_TIMEOUT_MS);
         long now = System.currentTimeMillis();
         for (Map.Entry<String, FprimeFileTransfer> entry :
                 new ArrayList<>(pendingDownloadsByPath.entrySet())) {

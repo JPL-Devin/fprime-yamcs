@@ -5,6 +5,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +29,13 @@ public class CfdpDownlinkHandler {
 
     private static final Logger LOG = LoggerFactory.getLogger(CfdpDownlinkHandler.class);
 
+    /**
+     * Maximum completed reassemblies awaiting storage. Bounds the memory a
+     * fast (or spoofed) TM stream can pin in queued reassembly buffers when
+     * bucket writes are slower than downlinks complete.
+     */
+    static final int MAX_PENDING_STORES = 4;
+
     /** Supplies the API-level transfer record for a new downlink transaction. */
     public interface TransferResolver {
         FprimeFileTransfer resolve(String sourceFileName, String destinationFileName,
@@ -40,9 +49,11 @@ public class CfdpDownlinkHandler {
     private final TransferEventListener listener;
     private final Executor storageExecutor;
 
-    // In-flight transaction reassembly. Null means idle. Only touched from
-    // the TM stream subscriber thread.
+    // In-flight transaction reassembly. Null means idle. Guarded by the
+    // handler's monitor (all packet entry points are synchronized).
     private Reassembly inflight;
+    private long inflightLastActivity;
+    private final AtomicInteger pendingStores = new AtomicInteger();
 
     private static final class Reassembly {
         final int transactionSeq;
@@ -88,7 +99,7 @@ public class CfdpDownlinkHandler {
     }
 
     /** Process one CFDP PDU found at {@code offset} within {@code bytes}. */
-    public void handlePdu(byte[] bytes, int offset) {
+    public synchronized void handlePdu(byte[] bytes, int offset) {
         try {
             CfdpPdu.Header header = CfdpPdu.decodeHeader(bytes, offset);
             if (header.type == CfdpPdu.Type.FILE_DATA) {
@@ -108,8 +119,25 @@ public class CfdpDownlinkHandler {
                             Integer.toHexString(directive), header.transactionSeq);
             }
         } catch (Exception e) {
-            LOG.error("Error processing CFDP PDU", e);
-            failInflight("PDU processing error: " + e.getMessage());
+            // Drop undecodable PDUs rather than failing the in-flight
+            // transaction: garbage on the CFDP APID must not abort an
+            // unrelated healthy transfer. A dead transaction is reclaimed
+            // by the expireInflight sweeper.
+            LOG.error("Dropping undecodable CFDP PDU: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Fail the in-flight transaction if no PDU for it has arrived within
+     * {@code maxAgeMs}. Called periodically by the owning service so a
+     * Metadata never followed by EOF cannot pin its reassembly buffer
+     * forever.
+     */
+    public synchronized void expireInflight(long maxAgeMs) {
+        if (inflight != null && System.currentTimeMillis() - inflightLastActivity > maxAgeMs) {
+            LOG.warn("CFDP transaction {} stalled for over {} ms; failing",
+                    inflight.transactionSeq, maxAgeMs);
+            failInflight("transaction stalled: no PDU received within " + maxAgeMs + " ms");
         }
     }
 
@@ -121,7 +149,8 @@ public class CfdpDownlinkHandler {
         }
         CfdpPdu.Metadata md = CfdpPdu.decodeMetadata(bytes, header);
         LOG.info("CFDP downlink Metadata: tx={} size={} src={} dst={}",
-                header.transactionSeq, md.fileSize, md.sourceFileName, md.destinationFileName);
+                header.transactionSeq, md.fileSize,
+                ObjectNames.forLog(md.sourceFileName), ObjectNames.forLog(md.destinationFileName));
         if (md.fileSize < 0 || md.fileSize > maxFileSize) {
             LOG.error("Metadata declares file size {} outside [0, {}]; rejecting",
                     md.fileSize, maxFileSize);
@@ -145,6 +174,7 @@ public class CfdpDownlinkHandler {
         transfer.setState(TransferState.RUNNING);
         inflight = new Reassembly(header.transactionSeq, md.destinationFileName,
                 md.fileSize, transfer);
+        inflightLastActivity = System.currentTimeMillis();
         listener.stateChanged(transfer);
         listener.verifierAck(transfer, AckStatus.PENDING,
                 String.format("receiving %d bytes from %s", md.fileSize, md.sourceFileName));
@@ -170,6 +200,7 @@ public class CfdpDownlinkHandler {
             return;
         }
         System.arraycopy(bytes, data.dataStart, inflight.buffer, data.offset, data.dataSize);
+        inflightLastActivity = System.currentTimeMillis();
         // Clamp: duplicate or overlapping File Data offsets must not inflate
         // the reported progress past the declared file size.
         inflight.bytesReceived = (int) Math.min((long) inflight.declaredSize,
@@ -213,16 +244,39 @@ public class CfdpDownlinkHandler {
             objectName = ObjectNames.sanitize(inflight.destinationFileName);
         } catch (IllegalArgumentException e) {
             LOG.error("Rejecting unsafe destination file name '{}': {}",
-                    inflight.destinationFileName, e.getMessage());
+                    ObjectNames.forLog(inflight.destinationFileName), e.getMessage());
             failInflight("unsafe destination path: " + e.getMessage());
             return;
         }
         // Hand storage off so blocking bucket/mirror I/O never stalls the TM
         // stream subscriber thread. Clear the in-flight slot first: the
         // reassembly is complete and the next Metadata may arrive immediately.
+        // Bound the storage backlog so a fast TM stream cannot pin unbounded
+        // memory in queued reassembly buffers.
+        if (pendingStores.get() >= MAX_PENDING_STORES) {
+            failInflight("storage backlog: " + MAX_PENDING_STORES
+                    + " completed transfers already awaiting bucket writes");
+            return;
+        }
         Reassembly completed = inflight;
         inflight = null;
-        storageExecutor.execute(() -> store(completed, objectName));
+        pendingStores.incrementAndGet();
+        try {
+            storageExecutor.execute(() -> {
+                try {
+                    store(completed, objectName);
+                } finally {
+                    pendingStores.decrementAndGet();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            pendingStores.decrementAndGet();
+            String reason = "storage executor rejected write: " + e.getMessage();
+            completed.transfer.setFailureReason(reason);
+            completed.transfer.setState(TransferState.FAILED);
+            listener.stateChanged(completed.transfer);
+            listener.verifierAck(completed.transfer, AckStatus.NOK, reason);
+        }
     }
 
     private void store(Reassembly completed, String objectName) {

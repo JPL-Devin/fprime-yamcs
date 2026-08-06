@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Random;
+import java.util.concurrent.Executor;
 
 import org.junit.jupiter.api.Test;
 import org.yamcs.protobuf.TransferDirection;
@@ -25,12 +26,16 @@ public class CfdpDownlinkHandlerTest {
     private FprimeFileTransfer lastResolved;
 
     private CfdpDownlinkHandler handler(int maxFileSize) {
+        return handler(maxFileSize, Runnable::run);
+    }
+
+    private CfdpDownlinkHandler handler(int maxFileSize, Executor storageExecutor) {
         return new CfdpDownlinkHandler(bucket, null, maxFileSize,
                 (src, dst, size) -> {
                     lastResolved = new FprimeFileTransfer(1, "fake", dst, src, size,
                             TransferDirection.DOWNLOAD, "CFDP", false);
                     return lastResolved;
-                }, listener, Runnable::run);
+                }, listener, storageExecutor);
     }
 
     private void feed(CfdpDownlinkHandler h, byte[] pdu) {
@@ -161,6 +166,58 @@ public class CfdpDownlinkHandlerTest {
     public void malformedPduWithNoInflightIsIgnored() {
         CfdpDownlinkHandler h = handler(1024);
         feed(h, new byte[] { 0x20, 0, 0 });
-        assertFalse(bucket.objects.containsKey("d.bin"));
+        assertEquals(0, listener.stateChanges.size());
+        assertEquals(0, listener.acks.size());
+        assertTrue(bucket.objects.isEmpty());
+    }
+
+    @Test
+    public void malformedPduDoesNotFailInflightTransaction() {
+        byte[] content = new byte[10];
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        // Garbage on the CFDP APID must not abort the healthy transaction.
+        feed(h, new byte[] { 0x20, 0, 0 });
+        assertEquals(TransferState.RUNNING, lastResolved.getTransferState());
+
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 1, 0, content, 0, 10));
+        feed(h, CfdpPdu.encodeEof(REMOTE, LOCAL, 1, CfdpPdu.CONDITION_NO_ERROR,
+                CfdpChecksum.of(content), 10));
+        assertEquals(TransferState.COMPLETED, lastResolved.getTransferState());
+    }
+
+    @Test
+    public void stalledTransactionExpires() throws Exception {
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        Thread.sleep(5);
+        h.expireInflight(1);
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("stalled"));
+    }
+
+    @Test
+    public void freshTransactionSurvivesExpirySweep() {
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        h.expireInflight(60_000);
+        assertEquals(TransferState.RUNNING, lastResolved.getTransferState());
+    }
+
+    @Test
+    public void storageBacklogBoundFailsOverflowingTransfer() {
+        byte[] content = new byte[10];
+        // Executor that never runs its tasks: queued stores never drain.
+        CfdpDownlinkHandler h = handler(1024, task -> { });
+        for (int tx = 1; tx <= CfdpDownlinkHandler.MAX_PENDING_STORES; tx++) {
+            runTransaction(h, tx, content, "/d" + tx + ".bin", 10);
+            assertEquals(TransferState.RUNNING, lastResolved.getTransferState());
+        }
+
+        runTransaction(h, 99, content, "/overflow.bin", 10);
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("storage backlog"));
+        assertTrue(bucket.objects.isEmpty());
     }
 }

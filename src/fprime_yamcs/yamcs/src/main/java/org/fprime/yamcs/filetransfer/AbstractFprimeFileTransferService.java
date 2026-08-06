@@ -210,6 +210,20 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
         publishVerifierAck(transfer, ackStatus, reason);
     }
 
+    /**
+     * Flip every non-terminal (queued/running/paused) transfer to FAILED.
+     * Called from {@code doStop()} so stopped services never leave transfers
+     * stranded in a non-terminal state that eviction cannot reclaim.
+     */
+    protected void failNonTerminalTransfers(String reason) {
+        for (FprimeFileTransfer t : transfers.values()) {
+            TransferState s = t.getTransferState();
+            if (s != TransferState.COMPLETED && s != TransferState.FAILED) {
+                failTransfer(t, AckStatus.NOK, reason);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // Entities
     // ------------------------------------------------------------------
@@ -273,8 +287,12 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
                 }
             }
             if (candidates.size() > 1) {
-                log.warn("Multiple commands match suffix '{}': {}; using the first",
-                        suffix, candidates);
+                // Refuse ambiguous auto-discovery: which command wins would
+                // depend on MDB iteration order, and the chosen command is
+                // dispatched to the spacecraft. Require explicit config.
+                log.warn("Multiple commands match suffix '{}': {}; refusing auto-discovery — "
+                        + "configure the qualified command name explicitly", suffix, candidates);
+                return null;
             }
             name = candidates.isEmpty() ? null : candidates.get(0);
             log.info("Auto-discovered command for suffix '{}': {}", suffix, name);
@@ -303,7 +321,15 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
         }
     }
 
-    /** Build and dispatch a spacecraft command, returning its CommandId. */
+    /**
+     * Build and dispatch a spacecraft command, returning its CommandId.
+     *
+     * <p>Commands are dispatched as the YAMCS system user (matching the
+     * built-in {@code org.yamcs.cfdp.CfdpService} pattern): a user granted
+     * file-transfer privileges implicitly gains the authority to send the
+     * configured transfer commands, bypassing per-user command authorization.
+     * Deployments should gate file-transfer privileges accordingly.
+     */
     protected CommandId dispatchCommand(MetaCommand command, Map<String, Object> args,
                                         String origin, int sequenceNumber) throws Exception {
         PreparedCommand pc = commandingManager.buildCommand(
