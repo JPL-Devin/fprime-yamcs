@@ -21,6 +21,7 @@ import org.yamcs.buckets.Bucket;
 import org.yamcs.cmdhistory.CommandHistoryPublisher.AckStatus;
 import org.yamcs.filetransfer.FileTransfer;
 import org.yamcs.filetransfer.InvalidRequestException;
+import org.yamcs.filetransfer.RemoteFileListMonitor;
 import org.yamcs.filetransfer.TransferOptions;
 import org.yamcs.protobuf.Commanding.CommandId;
 import org.yamcs.protobuf.FileTransferCapabilities;
@@ -73,7 +74,7 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *       uplinkLink: UDP_TC_OUT.vc1     # YAMCS TC link to route through
  *       uplinkChunkSize: 128           # file bytes per File Data PDU
  *       interPacketDelayMs: 20         # pacing delay between uplink packets
- *       downlinkMirrorDir: /tmp/fprime-downlink  # local mirror (default)
+ *       downlinkMirrorDir: /tmp/fprime-downlink  # local mirror (default; "" disables)
  *       maxFileSize: 268435456         # downlink allocation cap in bytes
  *       fileDownlinkCommand: ""        # optional F´ command for startDownload
  *       sourceFileNameArg: sourceFileName  # downlink-command source-path argument name
@@ -392,8 +393,7 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
                     + "no Metadata PDU received", t.getId(), t.getRemotePath(), age);
             String reason = "timeout after " + age + " ms: no Metadata PDU for '"
                     + t.getRemotePath() + "'";
-            t.setFailureReason(reason);
-            t.setState(TransferState.FAILED);
+            t.fail(reason);
             notifyStateChanged(t);
             publishVerifierAck(t, AckStatus.TIMEOUT, reason);
         }
@@ -523,6 +523,16 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
 
     @Override
     public void saveFileList(ListFilesResponse listing) {
+        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+    }
+
+    @Override
+    public void registerRemoteFileListMonitor(RemoteFileListMonitor monitor) {
+        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+    }
+
+    @Override
+    public void notifyRemoteFileListMonitors(ListFilesResponse listing) {
         throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
     }
 }

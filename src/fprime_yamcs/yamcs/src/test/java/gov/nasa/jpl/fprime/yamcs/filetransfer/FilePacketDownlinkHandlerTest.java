@@ -243,6 +243,23 @@ public class FilePacketDownlinkHandlerTest {
     }
 
     @Test
+    public void staleOrDuplicateDataPacketIsDropped() {
+        byte[] content = new byte[10];
+        new Random(3).nextBytes(content);
+        byte[] garbage = new byte[10];
+        FilePacketDownlinkHandler h = handler(1024);
+        h.handleFilePacket(FilePacket.encodeStart(0, content.length, "/src", "/f"), 0);
+        h.handleFilePacket(FilePacket.encodeData(1, 0, content, 0, content.length), 0);
+        // Replayed sequence index carrying different bytes must not poison
+        // the already-accepted reassembly.
+        h.handleFilePacket(FilePacket.encodeData(1, 0, garbage, 0, garbage.length), 0);
+        h.handleFilePacket(FilePacket.encodeEnd(2, CfdpChecksum.of(content)), 0);
+
+        assertEquals(TransferState.COMPLETED, lastResolved.getTransferState());
+        assertArrayEquals(content, bucket.objects.get("f"));
+    }
+
+    @Test
     public void incompleteFileFailsAtEnd() {
         byte[] content = new byte[10];
         FilePacketDownlinkHandler h = handler(1024);

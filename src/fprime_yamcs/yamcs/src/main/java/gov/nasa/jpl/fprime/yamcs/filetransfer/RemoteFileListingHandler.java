@@ -115,7 +115,11 @@ public class RemoteFileListingHandler implements StreamSubscriber {
      * timeout sweeper.
      */
     public void expireStaleListings() {
-        long now = System.currentTimeMillis();
+        expireStaleListings(System.currentTimeMillis());
+    }
+
+    /** Clock-injectable variant of {@link #expireStaleListings()}. */
+    void expireStaleListings(long now) {
         for (Map.Entry<String, ListingAccumulator> entry :
                 new ArrayList<>(inProgressListings.entrySet())) {
             if (now - entry.getValue().createdAt > LISTING_EXPIRY_MS) {

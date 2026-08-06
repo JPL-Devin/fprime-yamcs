@@ -181,6 +181,21 @@ public class FprimeFileTransfer implements FileTransfer {
         this.failureReason = r;
     }
 
+    /**
+     * Atomically fail the transfer: the reason is recorded only if the
+     * FAILED transition is accepted, so a failure sweep racing a completing
+     * worker cannot leave a COMPLETED transfer with a stale failure reason.
+     *
+     * @return true if the transfer transitioned to FAILED
+     */
+    public synchronized boolean fail(String reason) {
+        if (!setState(TransferState.FAILED)) {
+            return false;
+        }
+        this.failureReason = reason;
+        return true;
+    }
+
     public void setTriggeringCommandId(CommandId id) {
         this.triggeringCommandId = id;
     }

@@ -111,8 +111,9 @@ public class FprimePacketPreprocessorTest {
         bb.putInt(EVENT_TIME_TAG_OFFSET + 4, 500_000); // microseconds
 
         TmPacket result = process(bytes);
-        // 38-second TAI-UTC leap offset applied by the preprocessor.
-        assertEquals((fprimeSeconds + 38) * 1000L + 500L, result.getGenerationTime());
+        // YAMCS's TAI-UTC leap-second table converts the Unix time tag.
+        assertEquals(TimeEncoding.fromUnixMillisec(fprimeSeconds * 1000L + 500L),
+                result.getGenerationTime());
     }
 
     @Test
@@ -124,7 +125,8 @@ public class FprimePacketPreprocessorTest {
         bb.putInt(TLM_TIME_TAG_OFFSET + 4, 250_000); // microseconds
 
         TmPacket result = process(bytes);
-        assertEquals((fprimeSeconds + 38) * 1000L + 250L, result.getGenerationTime());
+        assertEquals(TimeEncoding.fromUnixMillisec(fprimeSeconds * 1000L + 250L),
+                result.getGenerationTime());
     }
 
     @Test
@@ -137,7 +139,8 @@ public class FprimePacketPreprocessorTest {
         bb.putInt(EVENT_TIME_TAG_OFFSET + 4, 0);
 
         TmPacket result = process(bytes);
-        assertEquals((fprimeSeconds + 38) * 1000L, result.getGenerationTime());
+        assertEquals(TimeEncoding.fromUnixMillisec(fprimeSeconds * 1000L),
+                result.getGenerationTime());
     }
 
     @Test

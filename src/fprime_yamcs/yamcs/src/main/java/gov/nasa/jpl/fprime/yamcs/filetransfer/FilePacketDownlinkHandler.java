@@ -64,6 +64,9 @@ public class FilePacketDownlinkHandler {
         final byte[] buffer;
         final int declaredSize;
         int bytesReceived;
+        // Highest FilePacket sequence index accepted so far (START is 0);
+        // stale or duplicate DATA packets are rejected against it.
+        int lastSequenceIndex;
         final FprimeFileTransfer transfer;
 
         Reassembly(String src, String dst, int size, FprimeFileTransfer transfer) {
@@ -170,8 +173,7 @@ public class FilePacketDownlinkHandler {
             String reason = String.format(
                     "START declares file size %d outside [0, %d]",
                     start.fileSize, maxFileSize);
-            rejected.setFailureReason(reason);
-            rejected.setState(TransferState.FAILED);
+            rejected.fail(reason);
             listener.stateChanged(rejected);
             listener.verifierAck(rejected, AckStatus.NOK, reason);
             return;
@@ -196,6 +198,11 @@ public class FilePacketDownlinkHandler {
             LOG.warn("Got DATA seq={} with no in-flight transfer; dropping", header.sequenceIndex);
             return;
         }
+        if (header.sequenceIndex <= inflight.lastSequenceIndex) {
+            LOG.warn("Dropping stale/duplicate DATA seq={} (last accepted {})",
+                    header.sequenceIndex, inflight.lastSequenceIndex);
+            return;
+        }
         FilePacket.DataPayload data = FilePacket.decodeData(bytes, header.payloadOffset);
         // Long arithmetic: byteOffset is wire-controlled and int addition
         // could wrap negative and slip past the comparison.
@@ -207,6 +214,7 @@ public class FilePacketDownlinkHandler {
             return;
         }
         System.arraycopy(bytes, data.dataStart, inflight.buffer, data.byteOffset, data.dataSize);
+        inflight.lastSequenceIndex = header.sequenceIndex;
         inflightLastActivity = System.currentTimeMillis();
         // Clamp: duplicate or overlapping DATA offsets must not inflate the
         // reported progress past the declared file size.
@@ -274,8 +282,7 @@ public class FilePacketDownlinkHandler {
         } catch (RejectedExecutionException e) {
             pendingStores.decrementAndGet();
             String reason = "storage executor rejected write: " + e.getMessage();
-            completed.transfer.setFailureReason(reason);
-            completed.transfer.setState(TransferState.FAILED);
+            completed.transfer.fail(reason);
             listener.stateChanged(completed.transfer);
             listener.verifierAck(completed.transfer, AckStatus.NOK, reason);
         }
@@ -303,8 +310,7 @@ public class FilePacketDownlinkHandler {
         } catch (Exception e) {
             LOG.error("Failed to store file in bucket", e);
             String reason = "bucket write failed: " + e.getMessage();
-            completed.transfer.setFailureReason(reason);
-            completed.transfer.setState(TransferState.FAILED);
+            completed.transfer.fail(reason);
             listener.stateChanged(completed.transfer);
             listener.verifierAck(completed.transfer, AckStatus.NOK, reason);
         }
@@ -329,8 +335,7 @@ public class FilePacketDownlinkHandler {
         if (inflight == null) {
             return;
         }
-        inflight.transfer.setFailureReason(reason);
-        inflight.transfer.setState(TransferState.FAILED);
+        inflight.transfer.fail(reason);
         listener.stateChanged(inflight.transfer);
         listener.verifierAck(inflight.transfer, AckStatus.NOK, reason);
         inflight = null;

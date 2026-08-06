@@ -179,8 +179,7 @@ public class CfdpDownlinkHandler {
             String reason = String.format(
                     "Metadata declares file size %d outside [0, %d]",
                     md.fileSize, maxFileSize);
-            rejected.setFailureReason(reason);
-            rejected.setState(TransferState.FAILED);
+            rejected.fail(reason);
             listener.stateChanged(rejected);
             listener.verifierAck(rejected, AckStatus.NOK, reason);
             return;
@@ -300,8 +299,7 @@ public class CfdpDownlinkHandler {
         } catch (RejectedExecutionException e) {
             pendingStores.decrementAndGet();
             String reason = "storage executor rejected write: " + e.getMessage();
-            completed.transfer.setFailureReason(reason);
-            completed.transfer.setState(TransferState.FAILED);
+            completed.transfer.fail(reason);
             listener.stateChanged(completed.transfer);
             listener.verifierAck(completed.transfer, AckStatus.NOK, reason);
         }
@@ -329,8 +327,7 @@ public class CfdpDownlinkHandler {
         } catch (Exception e) {
             LOG.error("Failed to store file in bucket", e);
             String reason = "bucket write failed: " + e.getMessage();
-            completed.transfer.setFailureReason(reason);
-            completed.transfer.setState(TransferState.FAILED);
+            completed.transfer.fail(reason);
             listener.stateChanged(completed.transfer);
             listener.verifierAck(completed.transfer, AckStatus.NOK, reason);
         }
@@ -340,8 +337,7 @@ public class CfdpDownlinkHandler {
         if (inflight == null) {
             return;
         }
-        inflight.transfer.setFailureReason(reason);
-        inflight.transfer.setState(TransferState.FAILED);
+        inflight.transfer.fail(reason);
         listener.stateChanged(inflight.transfer);
         listener.verifierAck(inflight.transfer, AckStatus.NOK, reason);
         inflight = null;

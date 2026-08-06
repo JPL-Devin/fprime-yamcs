@@ -83,20 +83,21 @@ public class CfdpUplinkHandler {
                     CfdpPdu.CONDITION_NO_ERROR, CfdpChecksum.of(content), content.length));
 
             transfer.setTransferredSize(content.length);
-            transfer.setState(TransferState.COMPLETED);
-            LOG.info("CFDP uplink COMPLETE: id={} tx={} ({} bytes)",
-                    transfer.getId(), txSeq, content.length);
+            // Refused when the transfer was already failed (e.g. by a
+            // shutdown sweep); do not announce a stale completion.
+            if (transfer.setState(TransferState.COMPLETED)) {
+                LOG.info("CFDP uplink COMPLETE: id={} tx={} ({} bytes)",
+                        transfer.getId(), txSeq, content.length);
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.warn("CFDP uplink INTERRUPTED: id={} object={}",
                     transfer.getId(), transfer.getObjectName());
-            transfer.setFailureReason("interrupted");
-            transfer.setState(TransferState.FAILED);
+            transfer.fail("interrupted");
         } catch (Exception e) {
             LOG.error("CFDP uplink FAILED: id={} object={}",
                     transfer.getId(), transfer.getObjectName(), e);
-            transfer.setFailureReason(e.getMessage() != null ? e.getMessage() : e.toString());
-            transfer.setState(TransferState.FAILED);
+            transfer.fail(e.getMessage() != null ? e.getMessage() : e.toString());
         } finally {
             listener.stateChanged(transfer);
         }

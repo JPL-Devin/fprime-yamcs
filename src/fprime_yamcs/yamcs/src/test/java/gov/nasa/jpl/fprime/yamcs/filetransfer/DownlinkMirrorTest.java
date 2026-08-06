@@ -24,8 +24,12 @@ public class DownlinkMirrorTest {
     }
 
     @Test
-    public void nullMirrorDirIsNoop() {
+    public void nullMirrorDirIsNoop() throws Exception {
         DownlinkMirror.write(null, "file.bin", new byte[] { 1 });
+        // A disabled mirror must write nothing anywhere under the test root.
+        try (var walk = Files.walk(tmp)) {
+            assertTrue(walk.allMatch(Files::isDirectory));
+        }
     }
 
     @Test

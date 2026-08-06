@@ -434,8 +434,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
             String reason = "timeout after " + age + " ms: F´ did not emit a Start "
                     + "packet for '" + t.getRemotePath() + "' "
                     + "(command rejected? file missing? link down?)";
-            t.setFailureReason(reason);
-            t.setState(TransferState.FAILED);
+            t.fail(reason);
             notifyStateChanged(t);
             publishVerifierAck(t, AckStatus.TIMEOUT, reason);
         }

@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.yamcs.TmPacket;
 import org.yamcs.YConfiguration;
 import org.yamcs.tctm.AbstractPacketPreprocessor;
+import org.yamcs.utils.TimeEncoding;
 
 import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
 
@@ -50,9 +51,8 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
     private static final int APID_EVENT = 2; // default F´ APID for events
     private static final int APID_TLM_PKT = 4; // default F´ APID for telemetry packets
 
-    // TAI-UTC offset applied to F´ time tags, see
-    // https://docs.yamcs.org/yamcs-server-manual/general/time/
-    private static final int LEAP_SECONDS_OFFSET = 38;
+    // Impossible 14-bit sequence value marking a freshly seeded counter.
+    private static final int FIRST_PACKET_SENTINEL = -1;
 
     // Constructor used when this preprocessor is used without YAML configuration
     public FprimePacketPreprocessor(String yamcsInstance) {
@@ -82,18 +82,15 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
         int apidseqcount = SpacePacket.packetIdAndSequence(bytes);
         int apid = (apidseqcount >> 16) & 0x07FF;
         int seq = apidseqcount & 0x3FFF;
-        AtomicInteger ai = seqCounts.get(apid);
-        if (ai == null) {
-            // First packet seen on this APID: seed the counter and skip the
-            // continuity check so link start does not raise a spurious jump.
-            seqCounts.put(apid, new AtomicInteger(seq));
-        } else {
-            int oldseq = ai.getAndSet(seq);
-            if (((seq - oldseq) & 0x3FFF) != 1) {
-                eventProducer.sendWarning("SEQ_COUNT_JUMP",
-                        "Sequence count jump for APID: " + apid + " old seq: " + oldseq
-                                + " newseq: " + seq);
-            }
+        // computeIfAbsent makes the first-packet seed atomic; the sentinel
+        // marks it so link start does not raise a spurious jump.
+        AtomicInteger ai = seqCounts.computeIfAbsent(apid,
+                k -> new AtomicInteger(FIRST_PACKET_SENTINEL));
+        int oldseq = ai.getAndSet(seq);
+        if (oldseq != FIRST_PACKET_SENTINEL && ((seq - oldseq) & 0x3FFF) != 1) {
+            eventProducer.sendWarning("SEQ_COUNT_JUMP",
+                    "Sequence count jump for APID: " + apid + " old seq: " + oldseq
+                            + " newseq: " + seq);
         }
 
         // Find time tags depending on APID. APIDs without a known F´ time
@@ -109,16 +106,19 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
             ByteBuffer bb = ByteBuffer.wrap(bytes);
             // The F´ seconds field is an unsigned U32; mask so values past
             // 2038-01-19 do not wrap negative.
-            long timeSec = (bb.getInt(timeTagOffset) & 0xFFFFFFFFL) + LEAP_SECONDS_OFFSET;
+            long timeSec = bb.getInt(timeTagOffset) & 0xFFFFFFFFL;
             long timeUsec = bb.getInt(timeTagOffset + 4) & 0xFFFFFFFFL;
-            packet.setGenerationTime((timeSec * 1000L) + (timeUsec / 1000L));
+            // F´ time tags are Unix (UTC) epoch seconds; TimeEncoding applies
+            // YAMCS's maintained TAI-UTC leap-second table.
+            packet.setGenerationTime(TimeEncoding.fromUnixMillisec(
+                    (timeSec * 1000L) + (timeUsec / 1000L)));
         } else {
             if (timeTagOffset >= 0) {
                 eventProducer.sendWarning("SHORT_PACKET",
                         "Packet on APID " + apid + " too short for time tag (length "
                                 + bytes.length + "); using local time");
             }
-            packet.setGenerationTime(System.currentTimeMillis());
+            packet.setGenerationTime(TimeEncoding.getWallclockTime());
         }
 
         // Use the full 32 bits, so that both APID and the count are included.

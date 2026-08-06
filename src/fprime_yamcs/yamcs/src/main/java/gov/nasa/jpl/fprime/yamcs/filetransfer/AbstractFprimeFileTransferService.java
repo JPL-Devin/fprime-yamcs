@@ -217,8 +217,7 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
 
     /** Flip a transfer to FAILED and notify monitors and command history. */
     protected void failTransfer(FprimeFileTransfer transfer, AckStatus ackStatus, String reason) {
-        transfer.setFailureReason(reason);
-        transfer.setState(TransferState.FAILED);
+        transfer.fail(reason);
         notifyStateChanged(transfer);
         publishVerifierAck(transfer, ackStatus, reason);
     }

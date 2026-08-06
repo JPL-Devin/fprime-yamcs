@@ -70,7 +70,7 @@ The file transfer service routes uplink through the YAMCS data link named by the
 
 Reusable protocol pieces (`gov.nasa.jpl.fprime.yamcs.packet` codecs, `UplinkTransport`, `AbstractFprimeFileTransferService`) are shared infrastructure backing both services and any future transfer protocols.
 
-Run the Java unit tests with:
+Run the Java unit tests (requires JDK 17) with:
 
 ```
 mvn -f src/fprime_yamcs/yamcs/pom.xml test

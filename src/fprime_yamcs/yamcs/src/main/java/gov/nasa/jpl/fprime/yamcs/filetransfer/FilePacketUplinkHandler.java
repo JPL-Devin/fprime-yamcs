@@ -81,22 +81,23 @@ public class FilePacketUplinkHandler {
             send(FilePacket.encodeEnd(seq, CfdpChecksum.of(content)));
 
             transfer.setTransferredSize(content.length);
-            transfer.setState(TransferState.COMPLETED);
-            LOG.info("Uplink COMPLETE: id={} object={} ({} bytes)",
-                    transfer.getId(), transfer.getObjectName(), content.length);
+            // Refused when the transfer was already failed (e.g. by a
+            // shutdown sweep); do not announce a stale completion.
+            if (transfer.setState(TransferState.COMPLETED)) {
+                LOG.info("Uplink COMPLETE: id={} object={} ({} bytes)",
+                        transfer.getId(), transfer.getObjectName(), content.length);
+            }
         } catch (InterruptedException e) {
             // Service shutdown (executor.shutdownNow()); restore the flag so
             // the executor thread observes the interrupt.
             Thread.currentThread().interrupt();
             LOG.warn("Uplink INTERRUPTED: id={} object={}",
                     transfer.getId(), transfer.getObjectName());
-            transfer.setFailureReason("interrupted");
-            transfer.setState(TransferState.FAILED);
+            transfer.fail("interrupted");
         } catch (Exception e) {
             LOG.error("Uplink FAILED: id={} object={}",
                     transfer.getId(), transfer.getObjectName(), e);
-            transfer.setFailureReason(e.getMessage() != null ? e.getMessage() : e.toString());
-            transfer.setState(TransferState.FAILED);
+            transfer.fail(e.getMessage() != null ? e.getMessage() : e.toString());
         } finally {
             listener.stateChanged(transfer);
         }

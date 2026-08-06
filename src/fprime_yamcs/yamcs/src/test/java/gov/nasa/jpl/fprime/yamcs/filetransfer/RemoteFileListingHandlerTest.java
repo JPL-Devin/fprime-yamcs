@@ -160,4 +160,35 @@ public class RemoteFileListingHandlerTest {
         handler.failListing("/data");
         assertEquals("failed", handler.getFileList("/data").getState());
     }
+
+    @Test
+    public void staleListingExpiresAsFailed() {
+        handler.beginListing("/data");
+        handler.expireStaleListings(System.currentTimeMillis()
+                + RemoteFileListingHandler.LISTING_EXPIRY_MS + 1);
+        assertEquals("failed", handler.getFileList("/data").getState());
+    }
+
+    @Test
+    public void freshListingSurvivesExpirySweep() {
+        handler.beginListing("/data");
+        handler.expireStaleListings();
+        assertNull(handler.getFileList("/data"), "listing still in progress");
+        feed("ListDirectorySucceeded", "[ListDirectorySucceeded] Directory /data contains 0 files");
+        assertEquals("completed", handler.getFileList("/data").getState());
+    }
+
+    @Test
+    public void saveFileListRoundTripsThroughCache() {
+        ListFilesResponse listing = ListFilesResponse.newBuilder()
+                .setRemotePath("/saved")
+                .setState("success")
+                .addFiles(RemoteFile.newBuilder().setName("a.bin").setSize(1))
+                .build();
+        handler.saveFileList(listing);
+        assertEquals(listing, handler.getFileList("/saved"));
+
+        handler.saveFileList(null);
+        assertEquals(listing, handler.getFileList("/saved"), "null save must be a no-op");
+    }
 }

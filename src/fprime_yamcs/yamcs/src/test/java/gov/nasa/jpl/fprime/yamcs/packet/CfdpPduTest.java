@@ -1,6 +1,7 @@
 package gov.nasa.jpl.fprime.yamcs.packet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -129,6 +130,6 @@ public class CfdpPduTest {
     public void encodedPdusAreUnacknowledgedClass1() {
         byte[] pdu = CfdpPdu.encodeMetadata(1, 2, 0, 10, "a", "b");
         CfdpPdu.Header h = CfdpPdu.decodeHeader(pdu, 0);
-        assertTrue(!h.acknowledged);
+        assertFalse(h.acknowledged);
     }
 }
