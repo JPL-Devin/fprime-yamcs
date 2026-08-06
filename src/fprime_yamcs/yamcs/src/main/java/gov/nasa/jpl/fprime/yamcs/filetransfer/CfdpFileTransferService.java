@@ -24,6 +24,7 @@ import org.yamcs.filetransfer.InvalidRequestException;
 import org.yamcs.filetransfer.TransferOptions;
 import org.yamcs.protobuf.Commanding.CommandId;
 import org.yamcs.protobuf.FileTransferCapabilities;
+import org.yamcs.protobuf.ListFilesResponse;
 import org.yamcs.protobuf.TransferDirection;
 import org.yamcs.protobuf.TransferState;
 import org.yamcs.xtce.MetaCommand;
@@ -511,6 +512,17 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
                               String remotePath, Map<String, Object> options) {
         // Matches the declared capability (setFileList(false)): reject
         // rather than silently no-op if a client calls it anyway.
+        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+    }
+
+    @Override
+    public ListFilesResponse getFileList(String localEntity, String remoteEntity,
+                                         String remotePath, Map<String, Object> options) {
+        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+    }
+
+    @Override
+    public void saveFileList(ListFilesResponse listing) {
         throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
     }
 }

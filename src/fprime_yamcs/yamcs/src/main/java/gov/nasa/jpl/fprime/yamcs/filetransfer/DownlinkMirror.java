@@ -1,8 +1,11 @@
 package gov.nasa.jpl.fprime.yamcs.filetransfer;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,11 +48,14 @@ final class DownlinkMirror {
                 return;
             }
             Path target = realParent.resolve(mirrorPath.getFileName());
-            if (Files.isSymbolicLink(target)) {
-                LOG.warn("Refusing to mirror {}: target is a symbolic link", objectName);
-                return;
+            // NOFOLLOW_LINKS makes the no-follow atomic with the open, so a
+            // symlink planted between a check and the write cannot redirect
+            // the write outside the mirror root.
+            try (OutputStream out = Files.newOutputStream(target,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING, LinkOption.NOFOLLOW_LINKS)) {
+                out.write(content);
             }
-            Files.write(target, content);
             LOG.info("Mirrored downlink file to {}", target);
         } catch (IOException e) {
             LOG.warn("Failed to mirror file to {}: {}", mirrorDir, e.getMessage());

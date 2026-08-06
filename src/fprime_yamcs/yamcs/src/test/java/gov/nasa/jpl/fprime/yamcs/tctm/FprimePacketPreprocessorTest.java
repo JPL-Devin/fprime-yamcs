@@ -24,10 +24,14 @@ public class FprimePacketPreprocessorTest {
     }
 
     private static final int APID_EVENT = 2;
+    private static final int APID_TLM_PKT = 4;
     private static final int APID_OTHER = 9;
     // SpacePacket.PRIMARY_HEADER_LEN + descriptor(2) + eventId(4)
     // + timeBase(2) + timeContext(1)
     private static final int EVENT_TIME_TAG_OFFSET = 15;
+    // SpacePacket.PRIMARY_HEADER_LEN + descriptor(2) + packetizeId(2)
+    // + timeBase(2) + timeContext(1)
+    private static final int TLM_TIME_TAG_OFFSET = 13;
 
     private FprimePacketPreprocessor preprocessor;
     private Queue<Event> events;
@@ -109,6 +113,18 @@ public class FprimePacketPreprocessorTest {
         TmPacket result = process(bytes);
         // 38-second TAI-UTC leap offset applied by the preprocessor.
         assertEquals((fprimeSeconds + 38) * 1000L + 500L, result.getGenerationTime());
+    }
+
+    @Test
+    public void telemetryPacketTimeTagBecomesGenerationTime() {
+        long fprimeSeconds = 2_000_000L;
+        byte[] bytes = packet(APID_TLM_PKT, 1, TLM_TIME_TAG_OFFSET + 8);
+        ByteBuffer bb = ByteBuffer.wrap(bytes);
+        bb.putInt(TLM_TIME_TAG_OFFSET, (int) fprimeSeconds);
+        bb.putInt(TLM_TIME_TAG_OFFSET + 4, 250_000); // microseconds
+
+        TmPacket result = process(bytes);
+        assertEquals((fprimeSeconds + 38) * 1000L + 250L, result.getGenerationTime());
     }
 
     @Test

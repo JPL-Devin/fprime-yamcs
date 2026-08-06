@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.Executor;
 
@@ -222,6 +224,67 @@ public class FilePacketDownlinkHandlerTest {
         assertTrue(first.getFailuredReason().contains("superseded"));
         assertEquals(TransferState.COMPLETED, lastResolved.getTransferState());
         assertArrayEquals(content, bucket.objects.get("f2"));
+    }
+
+    @Test
+    public void invalidStartDoesNotSupersedeInflightTransfer() {
+        byte[] content = new byte[10];
+        FilePacketDownlinkHandler h = handler(20);
+        h.handleFilePacket(FilePacket.encodeStart(0, content.length, "/src", "/f1"), 0);
+        FprimeFileTransfer first = lastResolved;
+
+        // Size-rejected START must not abort the healthy transfer.
+        h.handleFilePacket(FilePacket.encodeStart(0, 21, "/src", "/too-big"), 0);
+        assertEquals(TransferState.RUNNING, first.getTransferState());
+
+        h.handleFilePacket(FilePacket.encodeData(1, 0, content, 0, content.length), 0);
+        h.handleFilePacket(FilePacket.encodeEnd(2, CfdpChecksum.of(content)), 0);
+        assertEquals(TransferState.COMPLETED, first.getTransferState());
+    }
+
+    @Test
+    public void incompleteFileFailsAtEnd() {
+        byte[] content = new byte[10];
+        FilePacketDownlinkHandler h = handler(1024);
+        h.handleFilePacket(FilePacket.encodeStart(0, content.length, "/src", "/f"), 0);
+        // Only half the declared bytes arrive before END.
+        h.handleFilePacket(FilePacket.encodeData(1, 0, content, 0, 5), 0);
+        h.handleFilePacket(FilePacket.encodeEnd(2, CfdpChecksum.of(content)), 0);
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("incomplete"));
+        assertTrue(bucket.objects.isEmpty());
+    }
+
+    @Test
+    public void bucketWriteFailureFailsTransfer() {
+        byte[] content = new byte[10];
+        bucket.failPuts = true;
+        FilePacketDownlinkHandler h = handler(1024);
+
+        sendSequence(h, "/f", content);
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("bucket write failed"));
+    }
+
+    @Test
+    public void lateStorageCompletionDoesNotResurrectFailedTransfer() {
+        byte[] content = new byte[10];
+        List<Runnable> deferred = new ArrayList<>();
+        FilePacketDownlinkHandler h = handler(1024, deferred::add);
+
+        sendSequence(h, "/f", content);
+        // Service shutdown fails the transfer while the write is queued.
+        lastResolved.setFailureReason("service stopped");
+        lastResolved.setState(TransferState.FAILED);
+        listener.stateChanges.clear();
+
+        deferred.forEach(Runnable::run);
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(listener.stateChanges.isEmpty(),
+                "late completion must not re-announce a terminal transfer");
     }
 
     @Test

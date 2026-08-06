@@ -582,8 +582,10 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
     public void fetchFileList(String localEntity, String remoteEntity,
                               String remotePath, Map<String, Object> options) {
         if (listDirectoryCommand == null) {
-            log.warn("fetchFileList({}): ListDirectory command unavailable", remotePath);
-            return;
+            // Surface the misconfiguration to the REST/UI caller instead of
+            // silently returning and leaving the listing request hanging.
+            throw new InvalidRequestException(
+                    "Remote file listing unavailable: ListDirectory command not found in MDB");
         }
         String dirName = normalizeDirName(remotePath);
         log.info("fetchFileList: requesting F´ listing of {}", dirName);

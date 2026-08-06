@@ -6,8 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 
 import org.junit.jupiter.api.Test;
 import org.yamcs.protobuf.TransferDirection;
@@ -76,6 +79,113 @@ public class CfdpDownlinkHandlerTest {
         feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL + 1, 2, 10, "s", "/d.bin"));
         assertNull(lastResolved, "mis-addressed PDUs must not start a transaction");
         assertTrue(bucket.objects.isEmpty());
+    }
+
+    @Test
+    public void towardSenderPdusAreDropped() {
+        CfdpDownlinkHandler h = handler(1024);
+        // An echoed uplink PDU has the right entities but the toward-sender
+        // direction bit set; it must not start a downlink transaction.
+        byte[] pdu = CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin");
+        pdu[0] |= 0x08; // direction: toward file sender
+        feed(h, pdu);
+        assertNull(lastResolved, "toward-sender PDUs must not start a transaction");
+        assertTrue(bucket.objects.isEmpty());
+    }
+
+    @Test
+    public void newMetadataSupersedesInflightTransaction() {
+        byte[] content = new byte[10];
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/first.bin"));
+        FprimeFileTransfer first = lastResolved;
+
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 2, 10, "s", "/second.bin"));
+        assertEquals(TransferState.FAILED, first.getTransferState());
+        assertTrue(first.getFailuredReason().contains("superseded"));
+
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 2, 0, content, 0, 10));
+        feed(h, CfdpPdu.encodeEof(REMOTE, LOCAL, 2, CfdpPdu.CONDITION_NO_ERROR,
+                CfdpChecksum.of(content), 10));
+        assertEquals(TransferState.COMPLETED, lastResolved.getTransferState());
+        assertArrayEquals(content, bucket.objects.get("second.bin"));
+    }
+
+    @Test
+    public void invalidMetadataDoesNotSupersedeInflightTransaction() {
+        byte[] content = new byte[10];
+        CfdpDownlinkHandler h = handler(20);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/first.bin"));
+        FprimeFileTransfer first = lastResolved;
+
+        // Size-rejected Metadata must not abort the healthy transaction.
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 2, 21, "s", "/too-big.bin"));
+        assertEquals(TransferState.RUNNING, first.getTransferState());
+
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 1, 0, content, 0, 10));
+        feed(h, CfdpPdu.encodeEof(REMOTE, LOCAL, 1, CfdpPdu.CONDITION_NO_ERROR,
+                CfdpChecksum.of(content), 10));
+        assertEquals(TransferState.COMPLETED, first.getTransferState());
+    }
+
+    @Test
+    public void incompleteFileFailsAtEof() {
+        byte[] content = new byte[10];
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        // Only half the declared bytes arrive before EOF.
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 1, 0, content, 0, 5));
+        feed(h, CfdpPdu.encodeEof(REMOTE, LOCAL, 1, CfdpPdu.CONDITION_NO_ERROR,
+                CfdpChecksum.of(content), 10));
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("incomplete"));
+        assertTrue(bucket.objects.isEmpty());
+    }
+
+    @Test
+    public void bucketWriteFailureFailsTransfer() {
+        byte[] content = new byte[10];
+        bucket.failPuts = true;
+        CfdpDownlinkHandler h = handler(1024);
+
+        runTransaction(h, 1, content, "/d.bin", 10);
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("bucket write failed"));
+    }
+
+    @Test
+    public void rejectedStorageExecutorFailsTransfer() {
+        byte[] content = new byte[10];
+        CfdpDownlinkHandler h = handler(1024, task -> {
+            throw new RejectedExecutionException("shutting down");
+        });
+
+        runTransaction(h, 1, content, "/d.bin", 10);
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("storage executor rejected"));
+        assertTrue(bucket.objects.isEmpty());
+    }
+
+    @Test
+    public void lateStorageCompletionDoesNotResurrectFailedTransfer() {
+        byte[] content = new byte[10];
+        List<Runnable> deferred = new ArrayList<>();
+        CfdpDownlinkHandler h = handler(1024, deferred::add);
+
+        runTransaction(h, 1, content, "/d.bin", 10);
+        // Service shutdown fails the transfer while the write is queued.
+        lastResolved.setFailureReason("service stopped");
+        lastResolved.setState(TransferState.FAILED);
+        listener.stateChanges.clear();
+
+        deferred.forEach(Runnable::run);
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(listener.stateChanges.isEmpty(),
+                "late completion must not re-announce a terminal transfer");
     }
 
     @Test

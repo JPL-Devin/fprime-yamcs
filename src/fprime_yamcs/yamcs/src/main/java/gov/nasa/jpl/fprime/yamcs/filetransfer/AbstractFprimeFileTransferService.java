@@ -71,9 +71,10 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     protected static final int MAX_TRANSFER_HISTORY = 1000;
 
     /**
-     * Maximum uplink transfers queued behind the single uplink worker.
-     * Each queued task pins its full file contents in memory, so this
-     * mirrors the downlink storage-backlog bound.
+     * Maximum outstanding uplink transfers (the running task plus those
+     * queued behind the single uplink worker). Each outstanding task pins
+     * its full file contents in memory, so this mirrors the downlink
+     * storage-backlog bound.
      */
     protected static final int MAX_PENDING_UPLOADS = 4;
 
@@ -230,13 +231,15 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
      */
     protected void submitUplink(ExecutorService uplinkExecutor,
                                 FprimeFileTransfer transfer, Runnable task) {
-        if (pendingUplinks.get() >= MAX_PENDING_UPLOADS) {
+        // Atomic reservation: increment first, roll back if over the bound,
+        // so concurrent submissions cannot slip past MAX_PENDING_UPLOADS.
+        if (pendingUplinks.incrementAndGet() > MAX_PENDING_UPLOADS) {
+            pendingUplinks.decrementAndGet();
             throw new InvalidRequestException("uplink backlog: " + MAX_PENDING_UPLOADS
                     + " transfers already queued");
         }
         addTransfer(transfer);
         notifyStateChanged(transfer);
-        pendingUplinks.incrementAndGet();
         try {
             uplinkExecutor.submit(() -> {
                 try {

@@ -1,7 +1,5 @@
 package gov.nasa.jpl.fprime.yamcs.filetransfer;
 
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.Executor;
@@ -154,10 +152,9 @@ public class FilePacketDownlinkHandler {
     }
 
     private void handleStart(byte[] bytes, FilePacket.Header header) {
-        if (inflight != null) {
-            LOG.warn("Got START while transfer in progress; dropping previous");
-            failInflight("superseded by new START");
-        }
+        // Decode and validate the incoming START *before* superseding the
+        // in-flight transfer: a malformed or size-rejected START must not
+        // abort an unrelated healthy transfer.
         FilePacket.StartPayload start = FilePacket.decodeStart(bytes, header.payloadOffset);
         LOG.info("File transfer START: seq={} size={} src={} dst={}",
                 header.sequenceIndex, start.fileSize,
@@ -180,6 +177,10 @@ public class FilePacketDownlinkHandler {
             return;
         }
 
+        if (inflight != null) {
+            LOG.warn("Got START while transfer in progress; dropping previous");
+            failInflight("superseded by new START");
+        }
         FprimeFileTransfer transfer = transferResolver.resolve(
                 start.sourcePath, start.destinationPath, start.fileSize);
         transfer.setState(TransferState.RUNNING);
@@ -222,6 +223,12 @@ public class FilePacketDownlinkHandler {
             return;
         }
         int receivedChecksum = FilePacket.decodeEndChecksum(bytes, header.payloadOffset);
+        if (inflight.bytesReceived != inflight.declaredSize) {
+            failInflight(String.format(
+                    "incomplete file: received %d of %d declared bytes",
+                    inflight.bytesReceived, inflight.declaredSize));
+            return;
+        }
         int computed = CfdpChecksum.of(inflight.buffer);
         if (computed != receivedChecksum) {
             LOG.error("Checksum mismatch on transfer {}: received=0x{} computed=0x{}",

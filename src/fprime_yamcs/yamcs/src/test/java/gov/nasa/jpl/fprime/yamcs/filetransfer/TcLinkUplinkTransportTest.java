@@ -108,6 +108,20 @@ public class TcLinkUplinkTransportTest {
     }
 
     @Test
+    public void interPacketDelayPacesSends() throws Exception {
+        FakeTcLink link = new FakeTcLink();
+        TcLinkUplinkTransport transport = new TcLinkUplinkTransport(link, "TestOrigin", 25);
+
+        long start = System.nanoTime();
+        transport.send(new byte[] { 1 });
+        transport.send(new byte[] { 2 });
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertEquals(2, link.sent.size());
+        assertTrue(elapsedMs >= 50, "expected >= 50 ms of pacing, got " + elapsedMs);
+    }
+
+    @Test
     public void linkRejectionPropagatesAsException() {
         FakeTcLink link = new FakeTcLink();
         link.accept = false;

@@ -16,6 +16,9 @@ class FakeBucket implements Bucket {
 
     final Map<String, byte[]> objects = new HashMap<>();
 
+    /** When true, every put fails — for storage failure-path tests. */
+    boolean failPuts;
+
     @Override
     public BucketLocation getLocation() {
         return null;
@@ -48,6 +51,9 @@ class FakeBucket implements Bucket {
     @Override
     public CompletableFuture<Void> putObjectAsync(
             String objectName, String contentType, Map<String, String> metadata, byte[] data) {
+        if (failPuts) {
+            return CompletableFuture.failedFuture(new java.io.IOException("disk full"));
+        }
         objects.put(objectName, data.clone());
         return CompletableFuture.completedFuture(null);
     }

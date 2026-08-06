@@ -161,11 +161,9 @@ public class CfdpDownlinkHandler {
     }
 
     private void handleMetadata(byte[] bytes, CfdpPdu.Header header) {
-        if (inflight != null) {
-            LOG.warn("Got Metadata while transaction {} in progress; dropping previous",
-                    inflight.transactionSeq);
-            failInflight("superseded by new Metadata");
-        }
+        // Decode and validate the incoming Metadata *before* superseding the
+        // in-flight transaction: a malformed or size-rejected Metadata must
+        // not abort an unrelated healthy transfer.
         CfdpPdu.Metadata md = CfdpPdu.decodeMetadata(bytes, header);
         LOG.info("CFDP downlink Metadata: tx={} size={} src={} dst={}",
                 header.transactionSeq, md.fileSize,
@@ -188,6 +186,11 @@ public class CfdpDownlinkHandler {
             return;
         }
 
+        if (inflight != null) {
+            LOG.warn("Got Metadata while transaction {} in progress; dropping previous",
+                    inflight.transactionSeq);
+            failInflight("superseded by new Metadata");
+        }
         FprimeFileTransfer transfer = transferResolver.resolve(
                 md.sourceFileName, md.destinationFileName, md.fileSize);
         transfer.setState(TransferState.RUNNING);
@@ -249,6 +252,12 @@ public class CfdpDownlinkHandler {
         if (eof.fileSize != inflight.declaredSize) {
             failInflight(String.format("EOF file size %d != Metadata file size %d",
                     eof.fileSize, inflight.declaredSize));
+            return;
+        }
+        if (inflight.bytesReceived != inflight.declaredSize) {
+            failInflight(String.format(
+                    "incomplete file: received %d of %d declared bytes",
+                    inflight.bytesReceived, inflight.declaredSize));
             return;
         }
         int computed = CfdpChecksum.of(inflight.buffer);
