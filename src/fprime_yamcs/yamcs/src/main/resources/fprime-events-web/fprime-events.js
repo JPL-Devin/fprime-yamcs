@@ -2,7 +2,13 @@
  * fprime-events.js:
  *
  * Yamcs web extension providing a GDS-style F Prime event display: whole-row
- * severity coloring and filtering on event ID, name, and F Prime severity.
+ * severity coloring and filtering on event ID, name, severity, and time.
+ *
+ * The table is virtualized: only the rows that fit the viewport (plus a
+ * small overscan) exist in the DOM, with spacer rows standing in for the
+ * rest. Scrolling to the top pages older events in from the Yamcs archive
+ * (infinite scroll-back); "Follow latest" keeps the view pinned to the
+ * newest event.
  *
  * Two custom elements are defined:
  *  - <fprime-yamcs>: initializer element (named after the Yamcs plugin id),
@@ -43,8 +49,10 @@ const YAMCS_SEVERITY_FALLBACK = {
 };
 
 const EVENT_SOURCE = "FPrimeEventProcessor";
-const MAX_EVENTS = 10000;
-const BACKFILL_LIMIT = 1000;
+const MAX_EVENTS = 50000;
+const PAGE_LIMIT = 500;
+const ROW_HEIGHT = 26;
+const OVERSCAN = 10;
 
 const PAGE_STYLE = `
   :host {
@@ -126,30 +134,40 @@ const PAGE_STYLE = `
     color: rgba(0, 0, 0, 0.54);
   }
   .fp-table-holder {
-    flex: 1 1 auto;
     overflow: auto;
     border: 1px solid rgba(0, 0, 0, 0.125);
   }
   table {
     width: 100%;
     border-collapse: collapse;
+    table-layout: fixed;
   }
   th, td {
     border: 1px solid rgba(0, 0, 0, 0.125);
-    padding: 3px 8px;
+    padding: 0 8px;
     text-align: left;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  td.fp-message {
-    white-space: normal;
-    word-break: break-word;
+  tbody tr {
+    height: ${ROW_HEIGHT}px;
+  }
+  tr.fp-spacer, tr.fp-spacer td {
+    border: none;
+    padding: 0;
   }
   thead th {
     position: sticky;
     top: 0;
     background: #eee;
     z-index: 1;
+    height: ${ROW_HEIGHT}px;
   }
+  col.fp-col-time { width: 190px; }
+  col.fp-col-id { width: 90px; }
+  col.fp-col-name { width: 28%; }
+  col.fp-col-severity { width: 100px; }
 `;
 
 /** Normalizes a Yamcs event into display fields */
@@ -189,14 +207,17 @@ class FprimeEventsElement extends HTMLElement {
     super();
     this._events = [];
     this._keys = new Set();
+    this._visible = [];
     this._filterText = "";
     this._enabledSeverities = new Set(SEVERITIES);
     this._subscription = null;
     this._service = null;
     this._follow = true;
-    this._shownCount = 0;
     this._timeStart = null;
     this._timeStop = null;
+    this._loadingOlder = false;
+    this._archiveExhausted = false;
+    this._renderedRange = [-1, -1];
   }
 
   set extensionService(service) {
@@ -206,13 +227,30 @@ class FprimeEventsElement extends HTMLElement {
   }
 
   connectedCallback() {
+    this._onResize = () => this.sizeHolder();
+    window.addEventListener("resize", this._onResize);
+    this.sizeHolder();
     if (this._service && !this._subscription) {
       this.connect();
     }
   }
 
   disconnectedCallback() {
+    window.removeEventListener("resize", this._onResize);
     this.disconnect();
+  }
+
+  /** Pins the table to the viewport height so it scrolls internally */
+  sizeHolder() {
+    const holder = this._tableHolder;
+    if (!holder) {
+      return;
+    }
+    const top = holder.getBoundingClientRect().top;
+    holder.style.height = `${Math.max(3 * ROW_HEIGHT, window.innerHeight - top - 16)}px`;
+    this._renderedRange = [-1, -1];
+    this.renderWindow();
+    this.scrollIfFollowing();
   }
 
   disconnect() {
@@ -293,7 +331,7 @@ class FprimeEventsElement extends HTMLElement {
     this._followCheck.checked = this._follow;
     this._followCheck.addEventListener("change", () => {
       this._follow = this._followCheck.checked;
-      this.scrollIfPinned();
+      this.scrollIfFollowing();
     });
     followLabel.appendChild(this._followCheck);
     followLabel.appendChild(document.createTextNode("Follow latest"));
@@ -316,15 +354,27 @@ class FprimeEventsElement extends HTMLElement {
 
     this._tableHolder = document.createElement("div");
     this._tableHolder.className = "fp-table-holder";
-    // Scrolling away from the bottom releases follow; scrolling back engages it
+    // Scrolling away from the bottom releases follow; scrolling back
+    // engages it. Nearing the top pages older events in from the archive.
     this._tableHolder.addEventListener("scroll", () => {
       const holder = this._tableHolder;
       this._follow =
         holder.scrollTop + holder.clientHeight >= holder.scrollHeight - 5;
       this._followCheck.checked = this._follow;
+      this.renderWindow();
+      if (holder.scrollTop < ROW_HEIGHT * OVERSCAN) {
+        this.loadOlder();
+      }
     });
 
     const table = document.createElement("table");
+    const colgroup = document.createElement("colgroup");
+    for (const cls of ["time", "id", "name", "severity", "message"]) {
+      const col = document.createElement("col");
+      col.className = `fp-col-${cls}`;
+      colgroup.appendChild(col);
+    }
+    table.appendChild(colgroup);
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
     for (const column of ["Time", "ID", "Name", "Severity", "Message"]) {
@@ -340,35 +390,59 @@ class FprimeEventsElement extends HTMLElement {
     page.appendChild(this._tableHolder);
 
     root.appendChild(page);
+    this.sizeHolder();
     this.redraw();
   }
 
   async connect() {
     this.disconnect();
     const yamcs = this._service.yamcs;
-    const instance = yamcs.instance;
-    const client = yamcs.yamcsClient;
+    this._instance = yamcs.instance;
+    this._client = yamcs.yamcsClient;
 
-    this._subscription = client.createEventSubscription(
-      { instance },
+    this._subscription = this._client.createEventSubscription(
+      { instance: this._instance },
       (event) => this.addEvents([event]),
     );
 
+    await this.loadOlder();
+  }
+
+  /** Pages the next-older chunk of archived events in (infinite scroll-back) */
+  async loadOlder() {
+    if (this._loadingOlder || this._archiveExhausted || !this._client) {
+      return;
+    }
+    this._loadingOlder = true;
     try {
-      const backfill = await client.getEvents(instance, {
+      const options = {
         source: [EVENT_SOURCE],
-        limit: BACKFILL_LIMIT,
+        limit: PAGE_LIMIT,
         order: "desc",
-      });
-      this.addEvents(backfill.reverse());
+      };
+      if (this._events.length) {
+        options.stop = this._events[0].time;
+      }
+      const page = await this._client.getEvents(this._instance, options);
+      const before = this._events.length;
+      this.addEvents(page);
+      if (this._events.length === before) {
+        this._archiveExhausted = true;
+      }
     } catch (err) {
-      console.error("fprime-events: backfill failed", err);
+      console.error("fprime-events: archive load failed", err);
+    } finally {
+      this._loadingOlder = false;
     }
   }
 
   addEvents(events) {
-    const appended = [];
-    let inOrder = true;
+    const holder = this._tableHolder;
+    const oldVisibleCount = this._visible.length;
+    const oldScrollTop = holder ? holder.scrollTop : 0;
+
+    let added = false;
+    let prepended = false;
     for (const event of events) {
       if (!isFprimeEvent(event)) {
         continue;
@@ -379,41 +453,32 @@ class FprimeEventsElement extends HTMLElement {
       }
       const last = this._events[this._events.length - 1];
       if (last && normalized.time.localeCompare(last.time) < 0) {
-        inOrder = false;
+        prepended = true;
       }
       this._keys.add(normalized.key);
       this._events.push(normalized);
-      appended.push(normalized);
+      added = true;
     }
-    if (!appended.length) {
+    if (!added) {
       return;
     }
-    if (!inOrder) {
+    if (prepended) {
       this._events.sort((a, b) => a.time.localeCompare(b.time));
     }
-    let trimmed = false;
-    if (this._events.length > MAX_EVENTS) {
+    // Cap the buffer; evict oldest only while following so scroll-back
+    // reading is never yanked away
+    if (this._follow && this._events.length > MAX_EVENTS) {
       const removed = this._events.splice(0, this._events.length - MAX_EVENTS);
       for (const item of removed) {
         this._keys.delete(item.key);
       }
-      trimmed = true;
     }
-    // Append-only fast path: avoids rebuilding up to MAX_EVENTS DOM rows
-    // per received event during event storms
-    if (inOrder && !trimmed && this._tbody) {
-      let shown = 0;
-      for (const item of appended) {
-        if (this.matches(item)) {
-          this._tbody.appendChild(this.buildRow(item));
-          shown++;
-        }
-      }
-      this._shownCount += shown;
-      this.updateCount();
-      this.scrollIfPinned();
-    } else {
-      this.redraw();
+    this.redraw();
+    // Keep the viewport anchored when older rows are inserted above it
+    if (prepended && holder && !this._follow) {
+      const addedAbove = this._visible.length - oldVisibleCount;
+      holder.scrollTop = oldScrollTop + addedAbove * ROW_HEIGHT;
+      this.renderWindow();
     }
   }
 
@@ -449,37 +514,64 @@ class FprimeEventsElement extends HTMLElement {
     for (const value of [item.time, item.id, item.name, item.severity, item.message]) {
       const td = document.createElement("td");
       td.textContent = value;
+      td.title = value;
       row.appendChild(td);
     }
-    row.lastChild.className = "fp-message";
     return row;
   }
 
-  updateCount() {
-    this._countLabel.textContent = `${this._shownCount} of ${this._events.length} events`;
-  }
-
-  scrollIfPinned() {
-    if (this._follow) {
+  scrollIfFollowing() {
+    if (this._follow && this._tableHolder) {
       this._tableHolder.scrollTop = this._tableHolder.scrollHeight;
+      this.renderWindow();
     }
   }
 
+  /** Recomputes the filtered list, then renders the visible window */
   redraw() {
     if (!this._tbody) {
       return;
     }
-    this._tbody.innerHTML = "";
-    this._shownCount = 0;
-    for (const item of this._events) {
-      if (!this.matches(item)) {
-        continue;
-      }
-      this._shownCount++;
-      this._tbody.appendChild(this.buildRow(item));
+    this._visible = this._events.filter((item) => this.matches(item));
+    this._countLabel.textContent = `${this._visible.length} of ${this._events.length} events`;
+    this._renderedRange = [-1, -1];
+    this.renderWindow();
+    this.scrollIfFollowing();
+  }
+
+  /** Places only the on-screen slice of rows in the DOM, between spacers */
+  renderWindow() {
+    const holder = this._tableHolder;
+    const total = this._visible.length;
+    const viewportRows = Math.ceil(holder.clientHeight / ROW_HEIGHT);
+    let first = Math.floor(holder.scrollTop / ROW_HEIGHT) - OVERSCAN;
+    first = Math.max(0, Math.min(first, total));
+    let last = Math.min(total, first + viewportRows + 2 * OVERSCAN);
+    if (first === this._renderedRange[0] && last === this._renderedRange[1]) {
+      return;
     }
-    this.updateCount();
-    this.scrollIfPinned();
+    this._renderedRange = [first, last];
+
+    this._tbody.innerHTML = "";
+    if (first > 0) {
+      this._tbody.appendChild(this.buildSpacer(first));
+    }
+    for (let i = first; i < last; i++) {
+      this._tbody.appendChild(this.buildRow(this._visible[i]));
+    }
+    if (last < total) {
+      this._tbody.appendChild(this.buildSpacer(total - last));
+    }
+  }
+
+  buildSpacer(rowCount) {
+    const row = document.createElement("tr");
+    row.className = "fp-spacer";
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    row.style.height = `${rowCount * ROW_HEIGHT}px`;
+    row.appendChild(td);
+    return row;
   }
 }
 
