@@ -1,9 +1,11 @@
 package gov.nasa.jpl.fprime.yamcs.tctm;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import org.yamcs.YConfiguration;
 import org.yamcs.cmdhistory.CommandHistoryPublisher;
 import org.yamcs.commanding.PreparedCommand;
-import org.yamcs.tctm.CcsdsSeqCountFiller;
 import org.yamcs.tctm.CommandPostprocessor;
 import org.yamcs.utils.ByteArrayUtils;
 
@@ -25,7 +27,9 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  */
 public class FprimeCommandPostprocessor implements CommandPostprocessor {
 
-    private final CcsdsSeqCountFiller seqFiller = new CcsdsSeqCountFiller();
+    // Per-APID CCSDS sequence counters, starting at 0 to match F Prime's
+    // ApidManager expectation (Yamcs' CcsdsSeqCountFiller starts at 1).
+    private static final Map<Integer, Integer> seqCounts = new HashMap<>();
     private CommandHistoryPublisher commandHistory;
 
     // Constructor used when this postprocessor is used without YAML configuration
@@ -76,7 +80,7 @@ public class FprimeCommandPostprocessor implements CommandPostprocessor {
                 SpacePacket.LENGTH_FIELD_OFFSET);
 
         // Set CCSDS sequence count
-        int seqCount = seqFiller.fill(binary);
+        int seqCount = fillSeqCount(binary);
 
         // Publish the sequence count to Command History so operators can
         // correlate a command with the CCSDS frame it went out in.
@@ -86,5 +90,15 @@ public class FprimeCommandPostprocessor implements CommandPostprocessor {
         commandHistory.publish(pc.getCommandId(), PreparedCommand.CNAME_BINARY, binary);
 
         return binary;
+    }
+
+    /** Patches the next per-APID sequence count into the packet and returns it. */
+    private static synchronized int fillSeqCount(byte[] binary) {
+        int apid = ByteArrayUtils.decodeUnsignedShort(binary, 0) & 0x07FF;
+        int seqCount = seqCounts.getOrDefault(apid, 0);
+        seqCounts.put(apid, (seqCount + 1) % (1 << 14));
+        int seqCtrl = (ByteArrayUtils.decodeUnsignedShort(binary, 2) & 0xC000) | seqCount;
+        ByteArrayUtils.encodeUnsignedShort(seqCtrl, binary, 2);
+        return seqCount;
     }
 }
