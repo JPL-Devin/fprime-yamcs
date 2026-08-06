@@ -137,6 +137,9 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     @Override
     public List<FileTransfer> getTransfers(FileTransferFilter filter) {
         List<FileTransfer> all = new ArrayList<>(transfers.values());
+        // Newest first: ConcurrentHashMap iteration order is arbitrary, and
+        // filter.limit must truncate to the most recent transfers.
+        all.sort(Comparator.comparingLong(FileTransfer::getId).reversed());
         if (filter == null) {
             return all;
         }

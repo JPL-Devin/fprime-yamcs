@@ -115,10 +115,29 @@ public class TcLinkUplinkTransportTest {
         long start = System.nanoTime();
         transport.send(new byte[] { 1 });
         transport.send(new byte[] { 2 });
+        transport.send(new byte[] { 3 });
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
-        assertEquals(2, link.sent.size());
+        assertEquals(3, link.sent.size());
         assertTrue(elapsedMs >= 50, "expected >= 50 ms of pacing, got " + elapsedMs);
+    }
+
+    @Test
+    public void pacingIsSharedAcrossTransportsOnTheSameLink() throws Exception {
+        FakeTcLink link = new FakeTcLink();
+        // Two services (e.g. FilePacket and CFDP) resolving the same link
+        // must not interleave packets faster than the drain interval.
+        TcLinkUplinkTransport a = new TcLinkUplinkTransport(link, "ServiceA", 25);
+        TcLinkUplinkTransport b = new TcLinkUplinkTransport(link, "ServiceB", 25);
+
+        long start = System.nanoTime();
+        a.send(new byte[] { 1 });
+        b.send(new byte[] { 2 });
+        a.send(new byte[] { 3 });
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertEquals(3, link.sent.size());
+        assertTrue(elapsedMs >= 50, "expected >= 50 ms of cross-service pacing, got " + elapsedMs);
     }
 
     @Test

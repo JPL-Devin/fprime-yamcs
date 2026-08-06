@@ -1,5 +1,9 @@
 package gov.nasa.jpl.fprime.yamcs.filetransfer;
 
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yamcs.YamcsServer;
@@ -24,7 +28,30 @@ public class TcLinkUplinkTransport implements UplinkTransport {
 
     private static final Logger LOG = LoggerFactory.getLogger(TcLinkUplinkTransport.class);
 
+    // One pacer per underlying TcDataLink, shared by every transport that
+    // resolves the same link: services (e.g. FilePacket and CFDP) uplinking
+    // through one link must not interleave packets faster than the
+    // spacecraft-side accumulator drain interval. Weak keys let the pacer
+    // die with the link.
+    private static final Map<TcDataLink, LinkPacer> PACERS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static final class LinkPacer {
+        private long nextSendAtMs;
+
+        // Serializing concurrent senders behind the sleeping monitor is the
+        // point: they must not send until the reserved interval elapses.
+        synchronized void pace(long delayMs) throws InterruptedException {
+            long wait = nextSendAtMs - System.currentTimeMillis();
+            if (wait > 0) {
+                Thread.sleep(wait);
+            }
+            nextSendAtMs = System.currentTimeMillis() + delayMs;
+        }
+    }
+
     private final TcDataLink link;
+    private final LinkPacer pacer;
     private final String origin;
     private final long interPacketDelayMs;
     // Synthetic CommandId sequence counter. Each uplinked packet gets a
@@ -59,6 +86,7 @@ public class TcLinkUplinkTransport implements UplinkTransport {
 
     public TcLinkUplinkTransport(TcDataLink link, String origin, long interPacketDelayMs) {
         this.link = link;
+        this.pacer = PACERS.computeIfAbsent(link, l -> new LinkPacer());
         this.origin = origin;
         this.interPacketDelayMs = interPacketDelayMs;
     }
@@ -76,9 +104,12 @@ public class TcLinkUplinkTransport implements UplinkTransport {
      */
     @Override
     public void send(byte[] spacePacket) throws Exception {
-        // Lock only around the CommandId allocation and link submission —
-        // never across the pacing sleep, so concurrent users of a shared
-        // transport are not serialized behind a sleeping lock holder.
+        // Give the spacecraft-side accumulator a moment to drain between
+        // packets — across every service sharing this link, not just this
+        // transport instance.
+        if (interPacketDelayMs > 0) {
+            pacer.pace(interPacketDelayMs);
+        }
         synchronized (this) {
             CommandId cmdId = CommandId.newBuilder()
                     .setGenerationTime(System.currentTimeMillis())
@@ -91,10 +122,6 @@ public class TcLinkUplinkTransport implements UplinkTransport {
             if (!link.sendCommand(pc)) {
                 throw new IllegalStateException("Link rejected packet (queue full or disabled)");
             }
-        }
-        // Give the spacecraft-side accumulator a moment to drain between packets.
-        if (interPacketDelayMs > 0) {
-            Thread.sleep(interPacketDelayMs);
         }
     }
 }
