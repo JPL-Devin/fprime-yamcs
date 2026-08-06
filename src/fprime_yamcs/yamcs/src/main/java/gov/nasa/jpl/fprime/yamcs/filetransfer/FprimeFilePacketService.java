@@ -3,11 +3,9 @@ package gov.nasa.jpl.fprime.yamcs.filetransfer;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
@@ -18,14 +16,11 @@ import org.yamcs.Spec;
 import org.yamcs.Spec.OptionType;
 import org.yamcs.YConfiguration;
 import org.yamcs.buckets.Bucket;
-import org.yamcs.cmdhistory.CommandHistoryPublisher.AckStatus;
 import org.yamcs.filetransfer.FileTransfer;
 import org.yamcs.filetransfer.InvalidRequestException;
 import org.yamcs.filetransfer.TransferOptions;
-import org.yamcs.protobuf.Commanding.CommandId;
 import org.yamcs.protobuf.FileTransferCapabilities;
 import org.yamcs.protobuf.TransferDirection;
-import org.yamcs.protobuf.TransferState;
 import org.yamcs.xtce.MetaCommand;
 import org.yamcs.yarch.Stream;
 import org.yamcs.yarch.StreamSubscriber;
@@ -137,6 +132,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
     // Runtime
     private Stream inStream;
     private Stream eventsStream;
+    private String eventsStreamName;
     private RemoteFileListingHandler eventsSubscriber;
     private FilePacketDownlinkHandler downlinkHandler;
     private FilePacketUplinkHandler uplinkHandler;
@@ -151,14 +147,6 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
     private MetaCommand fileDownlinkCommand;   // may be null if not in MDB
     private MetaCommand listDirectoryCommand;  // may be null if not in MDB
 
-    // Downlink routing: pending download transfers are keyed by the
-    // destination path F´ will emit in the FileDownlink Start packet
-    // (i.e. the bucket object name we asked F´ to use). When the Start
-    // arrives, the transfer resolver looks up the pending transfer by that
-    // path and attaches it to the reassembly so progress / completion flow
-    // back to the REST/UI layer.
-    private final Map<String, FprimeFileTransfer> pendingDownloadsByPath = new ConcurrentHashMap<>();
-
     // ------------------------------------------------------------------
     // Spec / configuration
     // ------------------------------------------------------------------
@@ -170,8 +158,6 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         spec.addOption("bucket", OptionType.STRING).withDefault("fprimeFilesIn");
         spec.addOption("fileApid", OptionType.INTEGER).withDefault(DEFAULT_FILE_APID);
         spec.addOption("maxFileSize", OptionType.INTEGER).withDefault(DEFAULT_MAX_FILE_SIZE);
-        // Mirroring defaults on (matching historical behavior); set to ""
-        // to disable local filesystem mirroring of downlinked files.
         // Mirroring defaults off: a world-writable default like /tmp could be
         // pre-created as a symlink by a local attacker before service start.
         // Point this at a directory owned by the YAMCS user to enable.
@@ -189,6 +175,9 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         spec.addOption("destFileNameArg", OptionType.STRING).withDefault("destFileName");
         spec.addOption("listDirectoryCommand", OptionType.STRING).withDefault("");
         spec.addOption("listDirDirNameArg", OptionType.STRING).withDefault("dirName");
+        // Stream carrying the decoded F´ events republished by the
+        // fprime-yamcs-events process; consumed for directory listings.
+        spec.addOption("eventsStream", OptionType.STRING).withDefault("events_realtime");
         // How long to wait for F´ to emit a Start packet after a
         // FileDownlink command is synthesized before flipping the pending
         // transfer to FAILED. 30 seconds is generous for a small fleet;
@@ -215,6 +204,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         this.destFileNameArg = config.getString("destFileNameArg", "destFileName");
         this.listDirectoryCommandName = config.getString("listDirectoryCommand", "");
         this.listDirDirNameArg = config.getString("listDirDirNameArg", "dirName");
+        this.eventsStreamName = config.getString("eventsStream", "events_realtime");
         this.downloadTimeoutMs = config.getLong("downloadTimeoutMs", 30000L);
         if (fileApid < 0 || fileApid > SpacePacket.MAX_APID) {
             throw new InitException("fileApid " + fileApid + " outside [0, "
@@ -284,7 +274,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
                 return t;
             });
             this.timeoutScheduler.scheduleWithFixedDelay(
-                    this::sweepPendingDownloadTimeouts, 5, 5, TimeUnit.SECONDS);
+                    this::sweepDownlinkTimeouts, 5, 5, TimeUnit.SECONDS);
 
             // Spacecraft command synthesis (downlink trigger, file listing).
             if (resolveProcessor()) {
@@ -303,14 +293,14 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
             // fprime-yamcs-events publishes decoded F´ events into the
             // events_realtime stream; the listing handler consumes FileManager
             // directory-listing events from it.
-            this.eventsStream = yarch.getStream("events_realtime");
+            this.eventsStream = yarch.getStream(eventsStreamName);
             if (eventsStream != null) {
                 this.eventsSubscriber = listingHandler;
                 eventsStream.addSubscriber(eventsSubscriber);
-                log.info("Subscribed to events_realtime for remote file listings");
+                log.info("Subscribed to {} for remote file listings", eventsStreamName);
             } else {
-                log.warn("events_realtime stream not found; fetchFileList will not "
-                        + "be able to collect results");
+                log.warn("{} stream not found; fetchFileList will not "
+                        + "be able to collect results", eventsStreamName);
             }
 
             this.inStream.addSubscriber(this);
@@ -391,64 +381,17 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         log.info("Stream {} closed", stream.getName());
     }
 
-    /**
-     * Attach an API-level transfer record to a newly started downlink.
-     * Two cases:
-     * <ol>
-     *   <li>The downlink was requested via startDownload(), so a transfer is
-     *       already waiting in pendingDownloadsByPath.
-     *   <li>This is an unsolicited downlink (command stack / REST triggered
-     *       FileDownlink.SendFile directly). A fresh transfer is created on
-     *       the fly so it still appears in the File Transfer UI.
-     * </ol>
-     */
     private FprimeFileTransfer resolveDownlinkTransfer(String sourcePath,
                                                        String destinationPath, int fileSize) {
-        FprimeFileTransfer transfer = pendingDownloadsByPath.remove(destinationPath);
-        if (transfer == null) {
-            transfer = new FprimeFileTransfer(nextTransferId(), bucketName, destinationPath,
-                    sourcePath, fileSize, TransferDirection.DOWNLOAD, TRANSFER_TYPE, false);
-            transfer.setStartTime(System.currentTimeMillis());
-            addTransfer(transfer);
-            log.info("Unsolicited downlink; created transfer record id={}", transfer.getId());
-        } else {
-            // Update the totalSize now that it is known from the Start packet.
-            transfer.setTotalSize(fileSize);
-        }
-        return transfer;
+        return resolveDownlinkTransfer(bucketName, TRANSFER_TYPE,
+                sourcePath, destinationPath, fileSize);
     }
 
-    /**
-     * Scheduled task: fail any pending download whose start time is older
-     * than {@code downloadTimeoutMs}. Transfers already linked to an
-     * in-flight reassembly are not in the pending map — this only catches
-     * the "F´ never responded to our FileDownlink command" case.
-     */
-    private void sweepPendingDownloadTimeouts() {
+    /** Scheduled task: expire stale listings, reassemblies, and pending downloads. */
+    private void sweepDownlinkTimeouts() {
         listingHandler.expireStaleListings();
         downlinkHandler.expireInflight(INFLIGHT_STALL_TIMEOUT_MS);
-        long now = System.currentTimeMillis();
-        for (Map.Entry<String, FprimeFileTransfer> entry :
-                new ArrayList<>(pendingDownloadsByPath.entrySet())) {
-            FprimeFileTransfer t = entry.getValue();
-            long age = now - t.getStartTime();
-            if (age < downloadTimeoutMs) {
-                continue;
-            }
-            // Best-effort atomic remove: if the Start packet handler beat us
-            // to it, remove() returns false and the state change is skipped.
-            if (!pendingDownloadsByPath.remove(entry.getKey(), t)) {
-                continue;
-            }
-            log.warn("Download timeout: id={} remotePath={} after {} ms — "
-                    + "no Start packet received", t.getId(), t.getRemotePath(), age);
-            String reason = "timeout after " + age + " ms: F´ did not emit a Start "
-                    + "packet for '" + t.getRemotePath() + "' "
-                    + "(command rejected? file missing? link down?)";
-            t.fail(reason);
-            notifyStateChanged(t);
-            publishVerifierAck(t, AckStatus.TIMEOUT, reason);
-        }
+        sweepPendingDownloadTimeouts(downloadTimeoutMs, "Start packet");
     }
 
     // ------------------------------------------------------------------
@@ -509,68 +452,10 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         // the downlink handler reassembles them and writes to the bucket.
         // The two halves are cross-referenced by destPath — the same string
         // appears in the Start packet's destinationPath field.
-        if (fileDownlinkCommand == null) {
-            throw new InvalidRequestException("Downlink command '"
-                    + fileDownlinkCommandName + "' not found in MDB");
-        }
-        if (sourcePath == null || sourcePath.isEmpty()) {
-            throw new InvalidRequestException("sourcePath (file on spacecraft) is required");
-        }
-        if (destBucket == null) {
-            throw new InvalidRequestException("destBucket is required");
-        }
-        if (destPath == null || destPath.isEmpty()) {
-            // Default to the basename of the source path, so operators can
-            // leave the destination blank in the UI.
-            destPath = sourcePath.contains("/")
-                    ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1)
-                    : sourcePath;
-            if (destPath.isEmpty()) {
-                throw new InvalidRequestException(
-                        "cannot derive a destination file name from '" + sourcePath
-                                + "'; specify destPath explicitly");
-            }
-        }
-
-        long id = nextTransferId();
-        FprimeFileTransfer transfer = new FprimeFileTransfer(
-                id,
-                destBucket.getName(),
-                destPath,           // bucket object name when it lands
-                sourcePath,         // path on F´ that was requested
-                -1,                 // total size unknown until Start packet arrives
-                TransferDirection.DOWNLOAD, TRANSFER_TYPE, false);
-        transfer.setStartTime(System.currentTimeMillis());
-        // Reject rather than overwrite: a displaced pending transfer could
-        // never be resolved or timed out and would sit RUNNING forever.
-        if (pendingDownloadsByPath.putIfAbsent(destPath, transfer) != null) {
-            throw new InvalidRequestException(
-                    "A download to '" + destPath + "' is already pending");
-        }
-        addTransfer(transfer);
-        notifyStateChanged(transfer);
-
-        try {
-            Map<String, Object> args = new HashMap<>();
-            args.put(sourceFileNameArg, sourcePath);
-            args.put(destFileNameArg, destPath);
-            CommandId cmdId = dispatchCommand(fileDownlinkCommand, args,
-                    getClass().getSimpleName(), (int) (id & 0x7FFFFFFF));
-            // Remember the CommandId so verifier acks can be published
-            // against this command's history entry as the transfer
-            // progresses through RUNNING -> COMPLETED/FAILED.
-            transfer.setTriggeringCommandId(cmdId);
-            publishVerifierAck(transfer, AckStatus.SCHEDULED,
-                    "waiting for spacecraft Start packet");
-            log.info("Downlink START: id={} source={} (on F´) -> bucket {}/{}",
-                    id, sourcePath, destBucket.getName(), destPath);
-        } catch (Exception e) {
-            log.error("Failed to dispatch FileDownlink command for transfer {}", id, e);
-            pendingDownloadsByPath.remove(destPath, transfer);
-            failTransfer(transfer, AckStatus.NOK, "command dispatch failed: " + e.getMessage());
-            throw new IOException("Failed to dispatch downlink command: " + e.getMessage(), e);
-        }
-        return transfer;
+        return startDownloadCommon(fileDownlinkCommand,
+                "Downlink command '" + fileDownlinkCommandName + "' not found in MDB",
+                TRANSFER_TYPE, sourcePath, destBucket, destPath,
+                sourceFileNameArg, destFileNameArg, "Start packet");
     }
 
     @Override
@@ -609,7 +494,8 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
             Map<String, Object> args = new HashMap<>();
             args.put(listDirDirNameArg, dirName);
             dispatchCommand(listDirectoryCommand, args,
-                    getClass().getSimpleName() + "-listing", 0);
+                    getClass().getSimpleName() + "-listing",
+                    (int) (nextTransferId() & 0x7FFFFFFF));
         } catch (Exception e) {
             log.error("fetchFileList({}): failed to dispatch ListDirectory command", dirName, e);
             // Publish a failed listing so the UI isn't stuck.

@@ -3,12 +3,9 @@ package gov.nasa.jpl.fprime.yamcs.filetransfer;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
@@ -19,16 +16,13 @@ import org.yamcs.Spec;
 import org.yamcs.Spec.OptionType;
 import org.yamcs.YConfiguration;
 import org.yamcs.buckets.Bucket;
-import org.yamcs.cmdhistory.CommandHistoryPublisher.AckStatus;
 import org.yamcs.filetransfer.FileTransfer;
 import org.yamcs.filetransfer.InvalidRequestException;
 import org.yamcs.filetransfer.RemoteFileListMonitor;
 import org.yamcs.filetransfer.TransferOptions;
-import org.yamcs.protobuf.Commanding.CommandId;
 import org.yamcs.protobuf.FileTransferCapabilities;
 import org.yamcs.protobuf.ListFilesResponse;
 import org.yamcs.protobuf.TransferDirection;
-import org.yamcs.protobuf.TransferState;
 import org.yamcs.xtce.MetaCommand;
 import org.yamcs.yarch.Stream;
 import org.yamcs.yarch.StreamSubscriber;
@@ -133,10 +127,6 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
     private ExecutorService storageExecutor;
     private ScheduledExecutorService timeoutScheduler;
     private MetaCommand fileDownlinkCommand;   // may be null if not in MDB
-
-    // Pending startDownload() transfers keyed by the destination file name
-    // the spacecraft will echo in its Metadata PDU.
-    private final Map<String, FprimeFileTransfer> pendingDownloadsByPath = new ConcurrentHashMap<>();
 
     // ------------------------------------------------------------------
     // Spec / configuration
@@ -271,7 +261,7 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
                 return t;
             });
             this.timeoutScheduler.scheduleWithFixedDelay(
-                    this::sweepPendingDownloadTimeouts, 5, 5, TimeUnit.SECONDS);
+                    this::sweepDownlinkTimeouts, 5, 5, TimeUnit.SECONDS);
 
             if (!fileDownlinkCommandName.isEmpty() && resolveProcessor()) {
                 this.fileDownlinkCommand = findCommand(fileDownlinkCommandName, null);
@@ -350,56 +340,22 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         log.info("Stream {} closed", stream.getName());
     }
 
-    /**
-     * Attach an API-level transfer record to a newly started downlink: a
-     * pending startDownload() transfer keyed by the destination file name,
-     * or a fresh record for an unsolicited (spacecraft initiated)
-     * transaction.
-     */
-    private FprimeFileTransfer resolveDownlinkTransfer(String sourceFileName,
-                                                       String destinationFileName, int fileSize) {
-        FprimeFileTransfer transfer = pendingDownloadsByPath.remove(destinationFileName);
-        if (transfer == null) {
-            transfer = new FprimeFileTransfer(nextTransferId(), bucketName,
-                    destinationFileName, sourceFileName, fileSize,
-                    TransferDirection.DOWNLOAD, TRANSFER_TYPE, false);
-            transfer.setEntityIds(localEntityId, remoteEntityId);
-            transfer.setStartTime(System.currentTimeMillis());
-            addTransfer(transfer);
-            log.info("Unsolicited CFDP downlink; created transfer record id={}",
-                    transfer.getId());
-        } else {
-            transfer.setTotalSize(fileSize);
-        }
-        return transfer;
+    /** Stamp CFDP entity ids onto download records created by the base class. */
+    @Override
+    protected void decorateDownloadTransfer(FprimeFileTransfer transfer) {
+        transfer.setEntityIds(localEntityId, remoteEntityId);
     }
 
-    /**
-     * Scheduled task: fail any pending download whose start time is older
-     * than {@code downloadTimeoutMs} — the "spacecraft never sent a
-     * Metadata PDU" case.
-     */
-    private void sweepPendingDownloadTimeouts() {
+    private FprimeFileTransfer resolveDownlinkTransfer(String sourceFileName,
+                                                       String destinationFileName, int fileSize) {
+        return resolveDownlinkTransfer(bucketName, TRANSFER_TYPE,
+                sourceFileName, destinationFileName, fileSize);
+    }
+
+    /** Scheduled task: expire stalled reassemblies and pending downloads. */
+    private void sweepDownlinkTimeouts() {
         downlinkHandler.expireInflight(INFLIGHT_STALL_TIMEOUT_MS);
-        long now = System.currentTimeMillis();
-        for (Map.Entry<String, FprimeFileTransfer> entry :
-                new ArrayList<>(pendingDownloadsByPath.entrySet())) {
-            FprimeFileTransfer t = entry.getValue();
-            long age = now - t.getStartTime();
-            if (age < downloadTimeoutMs) {
-                continue;
-            }
-            if (!pendingDownloadsByPath.remove(entry.getKey(), t)) {
-                continue;
-            }
-            log.warn("CFDP download timeout: id={} remotePath={} after {} ms — "
-                    + "no Metadata PDU received", t.getId(), t.getRemotePath(), age);
-            String reason = "timeout after " + age + " ms: no Metadata PDU for '"
-                    + t.getRemotePath() + "'";
-            t.fail(reason);
-            notifyStateChanged(t);
-            publishVerifierAck(t, AckStatus.TIMEOUT, reason);
-        }
+        sweepPendingDownloadTimeouts(downloadTimeoutMs, "Metadata PDU");
     }
 
     // ------------------------------------------------------------------
@@ -443,60 +399,11 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
                                       String destEntity, Bucket destBucket,
                                       String destPath, TransferOptions options)
             throws IOException {
-        if (fileDownlinkCommand == null) {
-            throw new InvalidRequestException("No CFDP downlink command configured; "
-                    + "only unsolicited (spacecraft initiated) downlinks are supported");
-        }
-        if (sourcePath == null || sourcePath.isEmpty()) {
-            throw new InvalidRequestException("sourcePath (file on spacecraft) is required");
-        }
-        if (destBucket == null) {
-            throw new InvalidRequestException("destBucket is required");
-        }
-        if (destPath == null || destPath.isEmpty()) {
-            destPath = sourcePath.contains("/")
-                    ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1)
-                    : sourcePath;
-            if (destPath.isEmpty()) {
-                throw new InvalidRequestException(
-                        "cannot derive a destination file name from '" + sourcePath
-                                + "'; specify destPath explicitly");
-            }
-        }
-
-        long id = nextTransferId();
-        FprimeFileTransfer transfer = new FprimeFileTransfer(
-                id, destBucket.getName(), destPath, sourcePath, -1,
-                TransferDirection.DOWNLOAD, TRANSFER_TYPE, false);
-        transfer.setEntityIds(localEntityId, remoteEntityId);
-        transfer.setStartTime(System.currentTimeMillis());
-        // Reject rather than overwrite: a displaced pending transfer could
-        // never be resolved or timed out and would sit RUNNING forever.
-        if (pendingDownloadsByPath.putIfAbsent(destPath, transfer) != null) {
-            throw new InvalidRequestException(
-                    "A download to '" + destPath + "' is already pending");
-        }
-        addTransfer(transfer);
-        notifyStateChanged(transfer);
-
-        try {
-            Map<String, Object> args = new HashMap<>();
-            args.put(sourceFileNameArg, sourcePath);
-            args.put(destFileNameArg, destPath);
-            CommandId cmdId = dispatchCommand(fileDownlinkCommand, args,
-                    getClass().getSimpleName(), (int) (id & 0x7FFFFFFF));
-            transfer.setTriggeringCommandId(cmdId);
-            publishVerifierAck(transfer, AckStatus.SCHEDULED,
-                    "waiting for spacecraft Metadata PDU");
-            log.info("CFDP downlink START: id={} source={} (on spacecraft) -> bucket {}/{}",
-                    id, sourcePath, destBucket.getName(), destPath);
-        } catch (Exception e) {
-            log.error("Failed to dispatch CFDP downlink command for transfer {}", id, e);
-            pendingDownloadsByPath.remove(destPath, transfer);
-            failTransfer(transfer, AckStatus.NOK, "command dispatch failed: " + e.getMessage());
-            throw new IOException("Failed to dispatch downlink command: " + e.getMessage(), e);
-        }
-        return transfer;
+        return startDownloadCommon(fileDownlinkCommand,
+                "No CFDP downlink command configured; "
+                        + "only unsolicited (spacecraft initiated) downlinks are supported",
+                TRANSFER_TYPE, sourcePath, destBucket, destPath,
+                sourceFileNameArg, destFileNameArg, "Metadata PDU");
     }
 
     @Override
@@ -544,13 +451,15 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
     }
 
+    // unregister/get are invoked during generic client teardown regardless
+    // of the declared capabilities, so they must not throw.
     @Override
     public void unregisterRemoteFileListMonitor(RemoteFileListMonitor monitor) {
-        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+        // No monitors can ever be registered; nothing to unregister.
     }
 
     @Override
     public Set<RemoteFileListMonitor> getRemoteFileListMonitors() {
-        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+        return Set.of();
     }
 }

@@ -146,8 +146,12 @@ public class FilePacketDownlinkHandler {
      * {@code maxAgeMs}. Called periodically by the owning service so a START
      * never followed by END/CANCEL cannot pin its reassembly buffer forever.
      */
-    public synchronized void expireInflight(long maxAgeMs) {
-        if (inflight != null && System.currentTimeMillis() - inflightLastActivity > maxAgeMs) {
+    public void expireInflight(long maxAgeMs) {
+        expireInflight(maxAgeMs, System.currentTimeMillis());
+    }
+
+    synchronized void expireInflight(long maxAgeMs, long now) {
+        if (inflight != null && now - inflightLastActivity > maxAgeMs) {
             LOG.warn("File transfer of {} stalled for over {} ms; failing",
                     inflight.destinationPath, maxAgeMs);
             failInflight("transfer stalled: no packet received within " + maxAgeMs + " ms");
@@ -163,19 +167,12 @@ public class FilePacketDownlinkHandler {
                 header.sequenceIndex, start.fileSize,
                 ObjectNames.forLog(start.sourcePath), ObjectNames.forLog(start.destinationPath));
         if (start.fileSize < 0 || start.fileSize > maxFileSize) {
-            LOG.error("START declares file size {} outside [0, {}]; rejecting",
+            // Drop without consuming any pending startDownload() transfer:
+            // a single spoofed START on the TM stream must not be able to
+            // fail an operator's pending download. A legitimate oversize
+            // downlink is caught by the pending-download timeout sweeper.
+            LOG.error("START declares file size {} outside [0, {}]; dropping",
                     start.fileSize, maxFileSize);
-            // Resolve and fail immediately so a pending startDownload()
-            // transfer gets the real rejection reason instead of waiting
-            // for the no-Start timeout sweeper.
-            FprimeFileTransfer rejected = transferResolver.resolve(
-                    start.sourcePath, start.destinationPath, 0);
-            String reason = String.format(
-                    "START declares file size %d outside [0, %d]",
-                    start.fileSize, maxFileSize);
-            rejected.fail(reason);
-            listener.stateChanged(rejected);
-            listener.verifierAck(rejected, AckStatus.NOK, reason);
             return;
         }
 

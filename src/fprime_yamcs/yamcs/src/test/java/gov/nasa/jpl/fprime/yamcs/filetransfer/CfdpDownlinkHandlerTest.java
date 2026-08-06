@@ -203,11 +203,12 @@ public class CfdpDownlinkHandlerTest {
     }
 
     @Test
-    public void oversizeMetadataFailsTransfer() {
+    public void oversizeMetadataIsDroppedWithoutConsumingPending() {
         CfdpDownlinkHandler h = handler(100);
         feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 101, "s", "/d.bin"));
-        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
-        assertTrue(lastResolved.getFailuredReason().contains("outside"));
+        // A spoofed oversize Metadata must not resolve (and fail) a pending
+        // startDownload() transfer; it is dropped outright.
+        assertNull(lastResolved);
         assertTrue(bucket.objects.isEmpty());
     }
 
@@ -309,11 +310,10 @@ public class CfdpDownlinkHandlerTest {
     }
 
     @Test
-    public void stalledTransactionExpires() throws Exception {
+    public void stalledTransactionExpires() {
         CfdpDownlinkHandler h = handler(1024);
         feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
-        Thread.sleep(5);
-        h.expireInflight(1);
+        h.expireInflight(1, System.currentTimeMillis() + 5);
 
         assertEquals(TransferState.FAILED, lastResolved.getTransferState());
         assertTrue(lastResolved.getFailuredReason().contains("stalled"));

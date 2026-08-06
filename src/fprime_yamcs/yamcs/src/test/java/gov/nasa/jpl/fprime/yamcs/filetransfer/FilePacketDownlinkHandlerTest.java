@@ -93,19 +93,20 @@ public class FilePacketDownlinkHandlerTest {
     }
 
     @Test
-    public void oversizeStartFailsTransfer() {
+    public void oversizeStartIsDroppedWithoutConsumingPending() {
         FilePacketDownlinkHandler h = handler(100);
         h.handleFilePacket(FilePacket.encodeStart(0, 101, "/src", "/f"), 0);
-        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
-        assertTrue(lastResolved.getFailuredReason().contains("outside"));
+        // A spoofed oversize START must not resolve (and fail) a pending
+        // startDownload() transfer; it is dropped outright.
+        assertNull(lastResolved);
         assertTrue(bucket.objects.isEmpty());
     }
 
     @Test
-    public void negativeDeclaredSizeFailsTransfer() {
+    public void negativeDeclaredSizeIsDropped() {
         FilePacketDownlinkHandler h = handler(100);
         h.handleFilePacket(FilePacket.encodeStart(0, -1, "/src", "/f"), 0);
-        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertNull(lastResolved);
         assertTrue(bucket.objects.isEmpty());
     }
 
@@ -150,11 +151,10 @@ public class FilePacketDownlinkHandlerTest {
     }
 
     @Test
-    public void stalledTransferExpires() throws Exception {
+    public void stalledTransferExpires() {
         FilePacketDownlinkHandler h = handler(1024);
         h.handleFilePacket(FilePacket.encodeStart(0, 10, "/src", "/f"), 0);
-        Thread.sleep(5);
-        h.expireInflight(1);
+        h.expireInflight(1, System.currentTimeMillis() + 5);
 
         assertEquals(TransferState.FAILED, lastResolved.getTransferState());
         assertTrue(lastResolved.getFailuredReason().contains("stalled"));

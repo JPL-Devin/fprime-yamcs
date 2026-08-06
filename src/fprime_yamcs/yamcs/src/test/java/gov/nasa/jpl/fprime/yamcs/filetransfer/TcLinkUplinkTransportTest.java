@@ -119,7 +119,8 @@ public class TcLinkUplinkTransportTest {
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
         assertEquals(3, link.sent.size());
-        assertTrue(elapsedMs >= 50, "expected >= 50 ms of pacing, got " + elapsedMs);
+        // Two 25 ms delays; tolerance for Thread.sleep sub-ms rounding.
+        assertTrue(elapsedMs >= 45, "expected >= 45 ms of pacing, got " + elapsedMs);
     }
 
     @Test
@@ -137,7 +138,7 @@ public class TcLinkUplinkTransportTest {
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
         assertEquals(3, link.sent.size());
-        assertTrue(elapsedMs >= 50, "expected >= 50 ms of cross-service pacing, got " + elapsedMs);
+        assertTrue(elapsedMs >= 45, "expected >= 45 ms of cross-service pacing, got " + elapsedMs);
     }
 
     @Test

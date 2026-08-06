@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -20,14 +21,16 @@ import org.yamcs.filetransfer.FileTransferFilter;
 import org.yamcs.filetransfer.InvalidRequestException;
 import org.yamcs.filetransfer.TransferMonitor;
 import org.yamcs.filetransfer.TransferOptions;
+import org.yamcs.protobuf.Commanding.CommandId;
 import org.yamcs.protobuf.FileTransferCapabilities;
 import org.yamcs.protobuf.TransferDirection;
 import org.yamcs.protobuf.TransferState;
+import org.yamcs.xtce.MetaCommand;
 
 public class AbstractFprimeFileTransferServiceTest {
 
     /** Minimal concrete service exposing the shared bookkeeping for test. */
-    private static final class TestService extends AbstractFprimeFileTransferService {
+    private static class TestService extends AbstractFprimeFileTransferService {
         @Override
         protected void addCapabilities(FileTransferCapabilities.Builder builder) {
         }
@@ -84,8 +87,27 @@ public class AbstractFprimeFileTransferServiceTest {
     }
 
     @Test
-    public void transferIdsAreUnique() {
-        assertTrue(service.nextTransferId() < service.nextTransferId());
+    public void transferIdsAreUniqueAcrossThreads() throws Exception {
+        int perThread = 200;
+        int threads = 4;
+        java.util.Set<Long> ids = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                futures.add(pool.submit(() -> {
+                    for (int j = 0; j < perThread; j++) {
+                        ids.add(service.nextTransferId());
+                    }
+                }));
+            }
+            for (java.util.concurrent.Future<?> f : futures) {
+                f.get();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(threads * perThread, ids.size());
     }
 
     @Test
@@ -258,6 +280,122 @@ public class AbstractFprimeFileTransferServiceTest {
                     }));
             assertTrue(e.getMessage().contains("backlog"));
         }
+    }
+
+    /** TestService with a fake command dispatcher for the download skeleton. */
+    private static final class DispatchTestService extends TestService {
+        final List<Map<String, Object>> dispatched = new ArrayList<>();
+        boolean failDispatch;
+
+        @Override
+        protected CommandId dispatchCommand(MetaCommand command, Map<String, Object> args,
+                String origin, int sequenceNumber) throws Exception {
+            if (failDispatch) {
+                throw new IllegalStateException("no processor");
+            }
+            dispatched.add(args);
+            return CommandId.newBuilder().setOrigin(origin)
+                    .setSequenceNumber(sequenceNumber).setGenerationTime(0)
+                    .setCommandName("/TEST/cmd").build();
+        }
+    }
+
+    private static final MetaCommand DOWNLINK_CMD = new MetaCommand("SendFile");
+
+    @Test
+    public void startDownloadRegistersPendingAndResolvesIt() throws Exception {
+        DispatchTestService svc = new DispatchTestService();
+        FakeBucket bucket = new FakeBucket();
+        FprimeFileTransfer t = svc.startDownloadCommon(DOWNLINK_CMD, "unavailable",
+                "TEST", "/logs/a.bin", bucket, null, "src", "dst", "Start packet");
+
+        // destPath derived from the source basename.
+        assertEquals("a.bin", t.getObjectName());
+        assertEquals(TransferState.QUEUED, t.getTransferState());
+        assertEquals(List.of(Map.of("src", "/logs/a.bin", "dst", "a.bin")), svc.dispatched);
+
+        // The spacecraft's Start/Metadata resolves the pending transfer
+        // rather than creating an unsolicited record.
+        FprimeFileTransfer resolved = svc.resolveDownlinkTransfer(
+                "bucket", "TEST", "/logs/a.bin", "a.bin", 123);
+        assertSame(t, resolved);
+        assertEquals(123, resolved.getTotalSize());
+
+        // Once consumed, the same name resolves to a fresh unsolicited record.
+        FprimeFileTransfer unsolicited = svc.resolveDownlinkTransfer(
+                "bucket", "TEST", "/logs/a.bin", "a.bin", 5);
+        assertTrue(unsolicited.getId() != t.getId());
+    }
+
+    @Test
+    public void startDownloadRejectsDuplicatePendingDestination() throws Exception {
+        DispatchTestService svc = new DispatchTestService();
+        FakeBucket bucket = new FakeBucket();
+        svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
+                "a.bin", bucket, null, "src", "dst", "Start packet");
+        InvalidRequestException e = assertThrows(InvalidRequestException.class,
+                () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
+                        "other/a.bin", bucket, "a.bin", "src", "dst", "Start packet"));
+        assertTrue(e.getMessage().contains("already pending"));
+    }
+
+    @Test
+    public void startDownloadValidatesInputs() {
+        DispatchTestService svc = new DispatchTestService();
+        FakeBucket bucket = new FakeBucket();
+        assertThrows(InvalidRequestException.class,
+                () -> svc.startDownloadCommon(null, "unavailable", "TEST",
+                        "a.bin", bucket, null, "src", "dst", "Start packet"));
+        assertThrows(InvalidRequestException.class,
+                () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
+                        "", bucket, null, "src", "dst", "Start packet"));
+        assertThrows(InvalidRequestException.class,
+                () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
+                        "a.bin", null, null, "src", "dst", "Start packet"));
+        // Trailing-slash source path yields an empty basename.
+        InvalidRequestException e = assertThrows(InvalidRequestException.class,
+                () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
+                        "/logs/", bucket, null, "src", "dst", "Start packet"));
+        assertTrue(e.getMessage().contains("destination file name"));
+    }
+
+    @Test
+    public void startDownloadRollsBackPendingOnDispatchFailure() throws Exception {
+        DispatchTestService svc = new DispatchTestService();
+        svc.failDispatch = true;
+        FakeBucket bucket = new FakeBucket();
+        assertThrows(java.io.IOException.class,
+                () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
+                        "a.bin", bucket, null, "src", "dst", "Start packet"));
+        FileTransfer failed = svc.getTransfers(null).get(0);
+        assertEquals(TransferState.FAILED, failed.getTransferState());
+
+        // The pending slot was released, so a retry is not blocked.
+        svc.failDispatch = false;
+        FprimeFileTransfer retry = svc.startDownloadCommon(DOWNLINK_CMD, "unavailable",
+                "TEST", "a.bin", bucket, null, "src", "dst", "Start packet");
+        assertEquals(TransferState.QUEUED, retry.getTransferState());
+    }
+
+    @Test
+    public void sweepFailsOnlyTimedOutPendingDownloads() throws Exception {
+        DispatchTestService svc = new DispatchTestService();
+        FakeBucket bucket = new FakeBucket();
+        FprimeFileTransfer stale = svc.startDownloadCommon(DOWNLINK_CMD, "unavailable",
+                "TEST", "stale.bin", bucket, null, "src", "dst", "Start packet");
+        FprimeFileTransfer fresh = svc.startDownloadCommon(DOWNLINK_CMD, "unavailable",
+                "TEST", "fresh.bin", bucket, null, "src", "dst", "Start packet");
+        stale.setStartTime(System.currentTimeMillis() - 60_000);
+
+        svc.sweepPendingDownloadTimeouts(30_000, "Start packet");
+
+        assertEquals(TransferState.FAILED, stale.getTransferState());
+        assertTrue(stale.getFailuredReason().contains("Start packet"));
+        assertEquals(TransferState.QUEUED, fresh.getTransferState());
+        // The stale entry is gone: its name resolves to a new record now.
+        assertTrue(svc.resolveDownlinkTransfer("bucket", "TEST", "s", "stale.bin", 1)
+                .getId() != stale.getId());
+        assertSame(fresh, svc.resolveDownlinkTransfer("bucket", "TEST", "s", "fresh.bin", 1));
     }
 
     @Test

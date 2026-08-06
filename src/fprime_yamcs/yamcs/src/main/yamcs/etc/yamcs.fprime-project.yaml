@@ -40,7 +40,10 @@ services:
       fileApid: 3
       downloadTimeoutMs: 8000
       uplinkChunkSize: ${FPRIME_UPLINK_CHUNK_SIZE:512}
-      downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:/tmp/runner/fprime-downlink}
+      # Optional local mirror of downlinked files; leave unset (off) unless
+      # pointed at a directory owned by the YAMCS user — world-writable
+      # locations like /tmp can be symlink-attacked before service start.
+      downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:}
 
   # Class-1 (unacknowledged) CFDP file transfer. Enable when the flight
   # software carries CFDP PDUs in space packets on a dedicated APID. The
@@ -58,7 +61,7 @@ services:
   #    remoteEntityId: 2
   #    uplinkLink: UDP_TC_OUT.vc1
   #    uplinkChunkSize: ${FPRIME_UPLINK_CHUNK_SIZE:512}
-  #    downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:/tmp/runner/fprime-downlink}
+  #    downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:}
 
 dataLinks:
   - name: UDP_TM_IN

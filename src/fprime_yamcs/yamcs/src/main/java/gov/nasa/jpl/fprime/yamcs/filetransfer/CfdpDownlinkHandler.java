@@ -152,8 +152,12 @@ public class CfdpDownlinkHandler {
      * Metadata never followed by EOF cannot pin its reassembly buffer
      * forever.
      */
-    public synchronized void expireInflight(long maxAgeMs) {
-        if (inflight != null && System.currentTimeMillis() - inflightLastActivity > maxAgeMs) {
+    public void expireInflight(long maxAgeMs) {
+        expireInflight(maxAgeMs, System.currentTimeMillis());
+    }
+
+    synchronized void expireInflight(long maxAgeMs, long now) {
+        if (inflight != null && now - inflightLastActivity > maxAgeMs) {
             LOG.warn("CFDP transaction {} stalled for over {} ms; failing",
                     inflight.transactionSeq, maxAgeMs);
             failInflight("transaction stalled: no PDU received within " + maxAgeMs + " ms");
@@ -169,19 +173,12 @@ public class CfdpDownlinkHandler {
                 header.transactionSeq, md.fileSize,
                 ObjectNames.forLog(md.sourceFileName), ObjectNames.forLog(md.destinationFileName));
         if (md.fileSize < 0 || md.fileSize > maxFileSize) {
-            LOG.error("Metadata declares file size {} outside [0, {}]; rejecting",
+            // Drop without consuming any pending startDownload() transfer:
+            // a single spoofed Metadata on the TM stream must not be able
+            // to fail an operator's pending download. A legitimate oversize
+            // downlink is caught by the pending-download timeout sweeper.
+            LOG.error("Metadata declares file size {} outside [0, {}]; dropping",
                     md.fileSize, maxFileSize);
-            // Resolve and fail immediately so a pending startDownload()
-            // transfer gets the real rejection reason instead of waiting
-            // for the timeout sweeper.
-            FprimeFileTransfer rejected = transferResolver.resolve(
-                    md.sourceFileName, md.destinationFileName, 0);
-            String reason = String.format(
-                    "Metadata declares file size %d outside [0, %d]",
-                    md.fileSize, maxFileSize);
-            rejected.fail(reason);
-            listener.stateChanged(rejected);
-            listener.verifierAck(rejected, AckStatus.NOK, reason);
             return;
         }
 

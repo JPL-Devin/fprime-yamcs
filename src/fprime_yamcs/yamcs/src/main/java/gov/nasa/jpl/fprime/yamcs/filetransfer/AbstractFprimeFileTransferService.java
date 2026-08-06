@@ -4,9 +4,11 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -37,6 +39,7 @@ import org.yamcs.filetransfer.TransferMonitor;
 import org.yamcs.protobuf.Commanding.CommandId;
 import org.yamcs.protobuf.EntityInfo;
 import org.yamcs.protobuf.ListFilesResponse;
+import org.yamcs.protobuf.TransferDirection;
 import org.yamcs.protobuf.TransferState;
 import org.yamcs.security.User;
 import org.yamcs.utils.TimeEncoding;
@@ -78,6 +81,9 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
      * storage-backlog bound.
      */
     protected static final int MAX_PENDING_UPLOADS = 4;
+
+    /** Bound on how long an API thread may block on a bucket read. */
+    protected static final int BUCKET_FETCH_TIMEOUT_S = 30;
 
     private final AtomicLong transferIdSeq = new AtomicLong(1);
     private final AtomicInteger pendingUplinks = new AtomicInteger();
@@ -237,6 +243,147 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
         publishVerifierAck(transfer, ackStatus, reason);
     }
 
+    // ------------------------------------------------------------------
+    // Pending download lifecycle (shared between protocols)
+    // ------------------------------------------------------------------
+
+    /**
+     * startDownload() transfers waiting for the spacecraft to begin the
+     * downlink, keyed by the destination file name the spacecraft echoes in
+     * its Metadata PDU / Start packet.
+     */
+    protected final Map<String, FprimeFileTransfer> pendingDownloadsByPath =
+            new ConcurrentHashMap<>();
+
+    /** Hook for subclasses to decorate a freshly created download record. */
+    protected void decorateDownloadTransfer(FprimeFileTransfer transfer) {
+    }
+
+    /**
+     * Attach an API-level transfer record to a newly started downlink: a
+     * pending startDownload() transfer keyed by the destination file name,
+     * or a fresh record for an unsolicited (spacecraft initiated) downlink
+     * so it still appears in the File Transfer UI.
+     */
+    protected FprimeFileTransfer resolveDownlinkTransfer(String bucketName, String transferType,
+            String sourcePath, String destinationPath, int fileSize) {
+        FprimeFileTransfer transfer = pendingDownloadsByPath.remove(destinationPath);
+        if (transfer == null) {
+            transfer = new FprimeFileTransfer(nextTransferId(), bucketName,
+                    destinationPath, sourcePath, fileSize,
+                    TransferDirection.DOWNLOAD, transferType, false);
+            transfer.setStartTime(System.currentTimeMillis());
+            decorateDownloadTransfer(transfer);
+            addTransfer(transfer);
+            log.info("Unsolicited {} downlink; created transfer record id={}",
+                    transferType, transfer.getId());
+        } else {
+            // Update the totalSize now that the spacecraft has declared it.
+            transfer.setTotalSize(fileSize);
+        }
+        return transfer;
+    }
+
+    /**
+     * Validate a startDownload() request, register the pending transfer, and
+     * dispatch the protocol's downlink command. The {@code noResponseHint}
+     * names the spacecraft response being awaited (for ack/timeout text).
+     */
+    protected FprimeFileTransfer startDownloadCommon(MetaCommand command,
+            String commandUnavailableMessage, String transferType,
+            String sourcePath, Bucket destBucket, String destPath,
+            String sourceFileNameArg, String destFileNameArg,
+            String noResponseHint) throws IOException {
+        if (command == null) {
+            throw new InvalidRequestException(commandUnavailableMessage);
+        }
+        if (sourcePath == null || sourcePath.isEmpty()) {
+            throw new InvalidRequestException("sourcePath (file on spacecraft) is required");
+        }
+        if (destBucket == null) {
+            throw new InvalidRequestException("destBucket is required");
+        }
+        if (destPath == null || destPath.isEmpty()) {
+            // Default to the basename of the source path, so operators can
+            // leave the destination blank in the UI.
+            destPath = sourcePath.contains("/")
+                    ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1)
+                    : sourcePath;
+            if (destPath.isEmpty()) {
+                throw new InvalidRequestException(
+                        "cannot derive a destination file name from '" + sourcePath
+                                + "'; specify destPath explicitly");
+            }
+        }
+
+        long id = nextTransferId();
+        FprimeFileTransfer transfer = new FprimeFileTransfer(
+                id, destBucket.getName(), destPath, sourcePath, -1,
+                TransferDirection.DOWNLOAD, transferType, false);
+        transfer.setStartTime(System.currentTimeMillis());
+        decorateDownloadTransfer(transfer);
+        // Reject rather than overwrite: a displaced pending transfer could
+        // never be resolved or timed out and would sit RUNNING forever.
+        if (pendingDownloadsByPath.putIfAbsent(destPath, transfer) != null) {
+            throw new InvalidRequestException(
+                    "A download to '" + destPath + "' is already pending");
+        }
+        addTransfer(transfer);
+        notifyStateChanged(transfer);
+
+        try {
+            Map<String, Object> args = new HashMap<>();
+            args.put(sourceFileNameArg, sourcePath);
+            args.put(destFileNameArg, destPath);
+            CommandId cmdId = dispatchCommand(command, args,
+                    getClass().getSimpleName(), (int) (id & 0x7FFFFFFF));
+            // Remember the CommandId so verifier acks can be published
+            // against this command's history entry as the transfer
+            // progresses through RUNNING -> COMPLETED/FAILED.
+            transfer.setTriggeringCommandId(cmdId);
+            publishVerifierAck(transfer, AckStatus.SCHEDULED,
+                    "waiting for spacecraft " + noResponseHint);
+            log.info("{} downlink START: id={} source={} (on spacecraft) -> bucket {}/{}",
+                    transferType, id, sourcePath, destBucket.getName(), destPath);
+        } catch (Exception e) {
+            log.error("Failed to dispatch downlink command for transfer {}", id, e);
+            pendingDownloadsByPath.remove(destPath, transfer);
+            failTransfer(transfer, AckStatus.NOK, "command dispatch failed: " + e.getMessage());
+            throw new IOException("Failed to dispatch downlink command: " + e.getMessage(), e);
+        }
+        return transfer;
+    }
+
+    /**
+     * Fail any pending download whose start time is older than
+     * {@code downloadTimeoutMs} — the "spacecraft never responded" case.
+     * Transfers already linked to an in-flight reassembly are not in the
+     * pending map.
+     */
+    protected void sweepPendingDownloadTimeouts(long downloadTimeoutMs, String noResponseHint) {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, FprimeFileTransfer> entry :
+                new ArrayList<>(pendingDownloadsByPath.entrySet())) {
+            FprimeFileTransfer t = entry.getValue();
+            long age = now - t.getStartTime();
+            if (age < downloadTimeoutMs) {
+                continue;
+            }
+            // Best-effort atomic remove: if the downlink handler beat us to
+            // it, remove() returns false and the state change is skipped.
+            if (!pendingDownloadsByPath.remove(entry.getKey(), t)) {
+                continue;
+            }
+            log.warn("Download timeout: id={} remotePath={} after {} ms — no {} received",
+                    t.getId(), t.getRemotePath(), age, noResponseHint);
+            String reason = "timeout after " + age + " ms: no " + noResponseHint
+                    + " for '" + t.getRemotePath() + "'";
+            t.fail(reason);
+            notifyStateChanged(t);
+            publishVerifierAck(t, AckStatus.TIMEOUT, reason);
+        }
+    }
+
     /**
      * Queue an uplink task, bounding the backlog: each queued task pins the
      * file contents in memory, so past {@link #MAX_PENDING_UPLOADS} the
@@ -384,13 +531,16 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
      * into the API-facing exception types.
      */
     protected static byte[] fetchObject(Bucket bucket, String objectName) throws IOException {
+        CompletableFuture<byte[]> future = bucket.getObjectAsync(objectName);
         try {
-            return bucket.getObjectAsync(objectName).get(30, TimeUnit.SECONDS);
+            return future.get(BUCKET_FETCH_TIMEOUT_S, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
+            future.cancel(true);
             Thread.currentThread().interrupt();
             throw new IOException("Interrupted while reading '" + objectName
                     + "' from bucket " + bucket.getName(), e);
         } catch (TimeoutException e) {
+            future.cancel(true);
             throw new IOException("Timed out reading '" + objectName
                     + "' from bucket " + bucket.getName(), e);
         } catch (ExecutionException | CompletionException e) {
