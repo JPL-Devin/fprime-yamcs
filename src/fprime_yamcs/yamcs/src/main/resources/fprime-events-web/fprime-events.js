@@ -26,10 +26,10 @@ const SEVERITIES = [
   "DIAGNOSTIC",
 ];
 
-// Color-blind-safe row colors (Okabe-Ito derived): the warning family is a
-// dark-to-light lightness ramp and the cool hues avoid red/green collisions
+// Color-blind-safe row colors (Okabe-Ito derived; red FATAL is safe since no
+// green is used): warning family is a dark-to-light lightness ramp
 const SEVERITY_COLORS = {
-  FATAL: "#D55E00",
+  FATAL: "#E03C31",
   WARNING_HI: "#E69F00",
   WARNING_LO: "#F0E442",
   ACTIVITY_HI: "#56B4E9",
