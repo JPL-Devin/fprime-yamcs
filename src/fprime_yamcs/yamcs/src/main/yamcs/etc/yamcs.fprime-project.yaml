@@ -45,7 +45,10 @@ services:
   # Class-1 (unacknowledged) CFDP file transfer. Enable when the flight
   # software carries CFDP PDUs in space packets on a dedicated APID. The
   # uplinkLink may be a TC frame virtual channel (as below) or a raw
-  # space-packet link such as org.yamcs.tctm.UdpTcDataLink.
+  # space-packet link such as org.yamcs.tctm.UdpTcDataLink. If a raw link is
+  # used, attach it to a dedicated tc stream (e.g. tc_cfdp declared under
+  # streamConfig) — a second link on tc_realtime would steal MDB commands
+  # from the primary TC link.
   #- class: org.fprime.yamcs.filetransfer.CfdpFileTransferService
   #  args:
   #    inStream: tm_realtime
