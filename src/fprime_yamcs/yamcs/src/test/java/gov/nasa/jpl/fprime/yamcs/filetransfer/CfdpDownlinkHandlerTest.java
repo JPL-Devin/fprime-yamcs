@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -210,6 +211,33 @@ public class CfdpDownlinkHandlerTest {
         // startDownload() transfer; it is dropped outright.
         assertNull(lastResolved);
         assertTrue(bucket.objects.isEmpty());
+    }
+
+    @Test
+    public void duplicateMetadataForInflightTransactionIgnored() {
+        byte[] content = new byte[10];
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        FprimeFileTransfer transfer = lastResolved;
+        // Retransmitted Metadata for the same transaction: the reassembly
+        // must continue, not restart or fail as superseded.
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        assertSame(transfer, lastResolved);
+        assertEquals(TransferState.RUNNING, transfer.getTransferState());
+
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 1, 0, content, 0, 10));
+        feed(h, CfdpPdu.encodeEof(REMOTE, LOCAL, 1, CfdpPdu.CONDITION_NO_ERROR,
+                CfdpChecksum.of(content), 10));
+        assertEquals(TransferState.COMPLETED, transfer.getTransferState());
+    }
+
+    @Test
+    public void acknowledgedModePduDropped() {
+        CfdpDownlinkHandler h = handler(1024);
+        byte[] pdu = CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin");
+        pdu[0] &= ~(1 << 2); // clear the mode bit: acknowledged (class-2)
+        feed(h, pdu);
+        assertNull(lastResolved, "class-2 PDUs must not start a transaction");
     }
 
     @Test

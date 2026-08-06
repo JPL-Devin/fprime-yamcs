@@ -121,6 +121,14 @@ public class CfdpDownlinkHandler {
                         remoteEntityId, localEntityId);
                 return;
             }
+            // Class-2 (acknowledged) transactions expect ACK/Finished PDUs
+            // this class-1 receiver never sends; drop rather than silently
+            // reassembling under the wrong semantics.
+            if (header.acknowledged) {
+                LOG.warn("Dropping acknowledged-mode (class-2) CFDP PDU; "
+                        + "only unacknowledged (class-1) transactions are supported");
+                return;
+            }
             if (header.type == CfdpPdu.Type.FILE_DATA) {
                 handleFileData(bytes, header);
                 return;
@@ -183,6 +191,13 @@ public class CfdpDownlinkHandler {
         }
 
         if (inflight != null) {
+            if (inflight.transactionSeq == header.transactionSeq) {
+                // Retransmitted Metadata for the transaction already being
+                // reassembled: ignore the duplicate rather than restarting.
+                LOG.warn("Ignoring duplicate Metadata for in-flight transaction {}",
+                        inflight.transactionSeq);
+                return;
+            }
             LOG.warn("Got Metadata while transaction {} in progress; dropping previous",
                     inflight.transactionSeq);
             failInflight("superseded by new Metadata");

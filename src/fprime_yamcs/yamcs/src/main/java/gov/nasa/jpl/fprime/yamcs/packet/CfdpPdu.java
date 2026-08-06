@@ -153,8 +153,12 @@ public final class CfdpPdu {
         int end = header.dataOffset + header.dataFieldLength;
         int p = header.dataOffset + 1; // skip directive code
         require(end - p >= 5, "Metadata PDU truncated");
-        // Byte after the directive code: closure requested + checksum type;
-        // both are informational for the class-1 modular-checksum subset.
+        // Byte after the directive code: closure requested + checksum type.
+        // Only the modular checksum (type 0) is supported; reject others at
+        // Metadata time rather than failing at EOF with a confusing mismatch.
+        int checksumType = bytes[p] & 0x0F;
+        require(checksumType == 0, "unsupported checksum type " + checksumType
+                + " (only modular, type 0, is supported)");
         int fileSize = ByteBuffer.wrap(bytes).getInt(p + 1);
         int srcLenOffset = p + 5;
         require(end - srcLenOffset >= 1, "Metadata source LV truncated");

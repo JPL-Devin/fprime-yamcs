@@ -319,20 +319,29 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         if (!(packetCol instanceof byte[])) {
             return;
         }
-        byte[] bytes = (byte[]) packetCol;
+        byte[] bytes = extractCfdpPacket((byte[]) packetCol, cfdpApid);
+        if (bytes != null) {
+            downlinkHandler.handlePdu(bytes, SpacePacket.PRIMARY_HEADER_LEN);
+        }
+    }
+
+    /**
+     * Filter a raw TM packet down to a CFDP space packet on {@code apid},
+     * trimmed to its CCSDS-declared length so trailing frame padding is
+     * never parsed as PDU content. Returns null for non-CFDP packets.
+     */
+    static byte[] extractCfdpPacket(byte[] bytes, int apid) {
         if (bytes.length < SpacePacket.PRIMARY_HEADER_LEN + CfdpPdu.minimumLength()) {
-            return;  // Too short to be a CFDP PDU; some other APID.
+            return null;  // Too short to be a CFDP PDU; some other APID.
         }
-        if (SpacePacket.apid(bytes) != cfdpApid) {
-            return;  // Not a CFDP packet.
+        if (SpacePacket.apid(bytes) != apid) {
+            return null;  // Not a CFDP packet.
         }
-        // Trim trailing padding beyond the CCSDS-declared length so it can
-        // never be parsed as PDU content.
         int declared = SpacePacket.declaredLength(bytes);
         if (bytes.length > declared) {
             bytes = Arrays.copyOf(bytes, declared);
         }
-        downlinkHandler.handlePdu(bytes, SpacePacket.PRIMARY_HEADER_LEN);
+        return bytes;
     }
 
     @Override
@@ -443,7 +452,10 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
 
     @Override
     public void registerRemoteFileListMonitor(RemoteFileListMonitor monitor) {
-        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+        // Generic clients may register monitors regardless of the declared
+        // capabilities; nothing will ever be published to them.
+        log.warn("Ignoring remote file list monitor registration: "
+                + "file listing is not supported by class-1 CFDP");
     }
 
     @Override

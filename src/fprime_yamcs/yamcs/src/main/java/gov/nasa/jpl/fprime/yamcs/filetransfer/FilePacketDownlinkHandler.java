@@ -66,7 +66,7 @@ public class FilePacketDownlinkHandler {
         int bytesReceived;
         // Highest FilePacket sequence index accepted so far (START is 0);
         // stale or duplicate DATA packets are rejected against it.
-        int lastSequenceIndex;
+        long lastSequenceIndex;
         final FprimeFileTransfer transfer;
 
         Reassembly(String src, String dst, int size, FprimeFileTransfer transfer) {

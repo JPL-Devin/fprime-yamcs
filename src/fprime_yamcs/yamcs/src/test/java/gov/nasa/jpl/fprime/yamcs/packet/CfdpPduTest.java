@@ -132,4 +132,16 @@ public class CfdpPduTest {
         CfdpPdu.Header h = CfdpPdu.decodeHeader(pdu, 0);
         assertFalse(h.acknowledged);
     }
+
+    @Test
+    public void unsupportedChecksumTypeRejectedAtMetadata() {
+        byte[] pdu = CfdpPdu.encodeMetadata(1, 2, 0, 10, "a", "b");
+        // Flags byte after the directive code carries the checksum type in
+        // its low nibble; 15 is the null checksum, which we do not support.
+        pdu[CfdpPdu.HEADER_LEN + 1] = (byte) 0x0F;
+        CfdpPdu.Header h = CfdpPdu.decodeHeader(pdu, 0);
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> CfdpPdu.decodeMetadata(pdu, h));
+        assertTrue(e.getMessage().contains("checksum type"));
+    }
 }

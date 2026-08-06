@@ -50,11 +50,11 @@ public final class FilePacket {
     public static final class Header {
         public final Type type;
         public final int rawType;
-        public final int sequenceIndex;
+        public final long sequenceIndex;
         /** Offset of the type-specific payload within the source buffer. */
         public final int payloadOffset;
 
-        Header(Type type, int rawType, int sequenceIndex, int payloadOffset) {
+        Header(Type type, int rawType, long sequenceIndex, int payloadOffset) {
             this.type = type;
             this.rawType = rawType;
             this.sequenceIndex = sequenceIndex;
@@ -119,7 +119,9 @@ public final class FilePacket {
         require(bytes.length - offset >= minimumLength(), "packet too short for header");
         int innerStart = offset + DESCRIPTOR_LEN;
         int rawType = bytes[innerStart] & 0xFF;
-        int seqIndex = ByteBuffer.wrap(bytes).getInt(innerStart + 1);
+        // U32 on the wire: widen to long so indices >= 2^31 do not wrap
+        // negative and trip staleness comparisons on very long transfers.
+        long seqIndex = ByteBuffer.wrap(bytes).getInt(innerStart + 1) & 0xFFFFFFFFL;
         return new Header(Type.fromValue(rawType), rawType, seqIndex, innerStart + HEADER_LEN);
     }
 
@@ -183,6 +185,10 @@ public final class FilePacket {
      * {@code [descriptor U16][type U8][seq U32][byteOffset U32][dataSize U16][data]}.
      */
     public static byte[] encodeData(int seq, int byteOffset, byte[] source, int srcOff, int len) {
+        if (len < 0 || len > 0xFFFF) {
+            throw new IllegalArgumentException(
+                    "DATA payload length " + len + " outside [0, 65535]");
+        }
         ByteBuffer bb = ByteBuffer.allocate(DESCRIPTOR_LEN + HEADER_LEN + 4 + 2 + len);
         putHeader(bb, Type.DATA, seq);
         bb.putInt(byteOffset);

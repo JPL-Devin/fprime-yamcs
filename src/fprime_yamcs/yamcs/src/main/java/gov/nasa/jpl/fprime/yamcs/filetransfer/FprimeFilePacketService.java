@@ -11,6 +11,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.yamcs.InitException;
 import org.yamcs.Spec;
 import org.yamcs.Spec.OptionType;
@@ -91,10 +93,15 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *       listDirectoryCommand: ""       # qualified MDB name; auto-discovered
  *                                      # by "ListDirectory" suffix when empty
  *       listDirDirNameArg: dirName     # ListDirectory directory argument name
+ *       eventsStream: events_realtime  # stream carrying F´ events used to
+ *                                      # collect remote file-listing results
  * </pre>
  */
 public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         implements StreamSubscriber {
+
+    private static final Logger LOG =
+            LoggerFactory.getLogger(FprimeFilePacketService.class);
 
     // 256 MiB: generously above any realistic Fw::FilePacket downlink while
     // bounding what a corrupt/malicious START packet can allocate.
@@ -356,24 +363,34 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         if (!(packetCol instanceof byte[])) {
             return;
         }
-        byte[] bytes = (byte[]) packetCol;
-        if (bytes.length < SpacePacket.PRIMARY_HEADER_LEN + FilePacket.minimumLength()) {
-            return;  // Too short to be a file packet; some other APID.
+        byte[] bytes = extractFilePacket((byte[]) packetCol, fileApid);
+        if (bytes != null) {
+            downlinkHandler.handleFilePacket(bytes, SpacePacket.PRIMARY_HEADER_LEN);
         }
-        if (SpacePacket.apid(bytes) != fileApid) {
-            return;  // Not a file packet.
+    }
+
+    /**
+     * Filter a raw TM packet down to an Fw::FilePacket space packet on
+     * {@code apid}, trimmed to its CCSDS-declared length so trailing frame
+     * padding is never parsed as packet content. Returns null for non-file
+     * packets.
+     */
+    static byte[] extractFilePacket(byte[] bytes, int apid) {
+        if (bytes.length < SpacePacket.PRIMARY_HEADER_LEN + FilePacket.minimumLength()) {
+            return null;  // Too short to be a file packet; some other APID.
+        }
+        if (SpacePacket.apid(bytes) != apid) {
+            return null;  // Not a file packet.
         }
         if (!FilePacket.isFilePacket(bytes, SpacePacket.PRIMARY_HEADER_LEN)) {
-            log.warn("Got APID {} but unexpected packet descriptor", fileApid);
-            return;
+            LOG.warn("Got APID {} but unexpected packet descriptor", apid);
+            return null;
         }
-        // Trim trailing padding beyond the CCSDS-declared length so it can
-        // never be parsed as packet content.
         int declared = SpacePacket.declaredLength(bytes);
         if (bytes.length > declared) {
             bytes = Arrays.copyOf(bytes, declared);
         }
-        downlinkHandler.handleFilePacket(bytes, SpacePacket.PRIMARY_HEADER_LEN);
+        return bytes;
     }
 
     @Override

@@ -102,6 +102,22 @@ public class FilePacketTest {
     }
 
     @Test
+    public void sequenceIndexDecodesUnsigned() {
+        // A wire sequence index >= 2^31 must not wrap negative.
+        byte[] pkt = FilePacket.encodeEnd(-1, 0); // seq 0xFFFFFFFF on the wire
+        FilePacket.Header h = FilePacket.decodeHeader(pkt, 0);
+        assertEquals(0xFFFFFFFFL, h.sequenceIndex);
+    }
+
+    @Test
+    public void oversizeDataPayloadRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> FilePacket.encodeData(1, 0, new byte[1], 0, 0x10000));
+        assertThrows(IllegalArgumentException.class,
+                () -> FilePacket.encodeData(1, 0, new byte[1], 0, -1));
+    }
+
+    @Test
     public void overlongPathsRejected() {
         String longPath = "x".repeat(256);
         assertThrows(IllegalArgumentException.class,

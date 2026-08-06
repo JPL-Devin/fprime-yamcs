@@ -43,6 +43,8 @@ services:
       # Optional local mirror of downlinked files; leave unset (off) unless
       # pointed at a directory owned by the YAMCS user — world-writable
       # locations like /tmp can be symlink-attacked before service start.
+      # (Previously defaulted to /tmp/runner/fprime-downlink; set
+      # FPRIME_DOWNLINK_DIR to restore mirroring.)
       downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:}
 
   # Class-1 (unacknowledged) CFDP file transfer. Enable when the flight
