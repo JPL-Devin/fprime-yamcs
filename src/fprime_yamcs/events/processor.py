@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import Optional
 
 from yamcs.client import YamcsClient
-from yamcs.client import Packet
+
+# yamcs-client 2.x moved Packet into yamcs.client; 1.x has yamcs.tmtc.model
+try:
+    from yamcs.client import Packet
+except ImportError:
+    from yamcs.tmtc.model import Packet
 
 # FPrime imports
 from fprime_gds.common.loaders.event_json_loader import EventJsonLoader
