@@ -91,6 +91,25 @@ const PAGE_STYLE = `
     cursor: pointer;
     user-select: none;
   }
+  .fp-time-range {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .fp-time-range input {
+    padding: 3px 4px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+  .fp-follow {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
   .fp-toolbar button {
     padding: 4px 10px;
     border: 1px solid #ccc;
@@ -174,8 +193,10 @@ class FprimeEventsElement extends HTMLElement {
     this._enabledSeverities = new Set(SEVERITIES);
     this._subscription = null;
     this._service = null;
-    this._pinnedToBottom = true;
+    this._follow = true;
     this._shownCount = 0;
+    this._timeStart = null;
+    this._timeStop = null;
   }
 
   set extensionService(service) {
@@ -224,6 +245,25 @@ class FprimeEventsElement extends HTMLElement {
     });
     toolbar.appendChild(this._filterInput);
 
+    const makeTimeInput = (title, onChange) => {
+      const input = document.createElement("input");
+      input.type = "datetime-local";
+      input.step = "1";
+      input.title = title;
+      input.addEventListener("change", () => {
+        onChange(input.value ? new Date(input.value).toISOString() : null);
+        this.redraw();
+      });
+      return input;
+    };
+    const timeRange = document.createElement("span");
+    timeRange.className = "fp-time-range";
+    timeRange.appendChild(document.createTextNode("From"));
+    timeRange.appendChild(makeTimeInput("Show events at or after this time", (v) => (this._timeStart = v)));
+    timeRange.appendChild(document.createTextNode("To"));
+    timeRange.appendChild(makeTimeInput("Show events before this time", (v) => (this._timeStop = v)));
+    toolbar.appendChild(timeRange);
+
     const severities = document.createElement("div");
     severities.className = "fp-severities";
     for (const severity of SEVERITIES) {
@@ -246,6 +286,19 @@ class FprimeEventsElement extends HTMLElement {
     }
     toolbar.appendChild(severities);
 
+    const followLabel = document.createElement("label");
+    followLabel.className = "fp-follow";
+    this._followCheck = document.createElement("input");
+    this._followCheck.type = "checkbox";
+    this._followCheck.checked = this._follow;
+    this._followCheck.addEventListener("change", () => {
+      this._follow = this._followCheck.checked;
+      this.scrollIfPinned();
+    });
+    followLabel.appendChild(this._followCheck);
+    followLabel.appendChild(document.createTextNode("Follow latest"));
+    toolbar.appendChild(followLabel);
+
     const clearButton = document.createElement("button");
     clearButton.textContent = "Clear";
     clearButton.addEventListener("click", () => {
@@ -263,10 +316,12 @@ class FprimeEventsElement extends HTMLElement {
 
     this._tableHolder = document.createElement("div");
     this._tableHolder.className = "fp-table-holder";
+    // Scrolling away from the bottom releases follow; scrolling back engages it
     this._tableHolder.addEventListener("scroll", () => {
       const holder = this._tableHolder;
-      this._pinnedToBottom =
+      this._follow =
         holder.scrollTop + holder.clientHeight >= holder.scrollHeight - 5;
+      this._followCheck.checked = this._follow;
     });
 
     const table = document.createElement("table");
@@ -367,6 +422,12 @@ class FprimeEventsElement extends HTMLElement {
     if (SEVERITIES.includes(item.severity) && !this._enabledSeverities.has(item.severity)) {
       return false;
     }
+    if (this._timeStart && item.time < this._timeStart) {
+      return false;
+    }
+    if (this._timeStop && item.time >= this._timeStop) {
+      return false;
+    }
     if (!this._filterText) {
       return true;
     }
@@ -399,7 +460,7 @@ class FprimeEventsElement extends HTMLElement {
   }
 
   scrollIfPinned() {
-    if (this._pinnedToBottom) {
+    if (this._follow) {
       this._tableHolder.scrollTop = this._tableHolder.scrollHeight;
     }
   }
