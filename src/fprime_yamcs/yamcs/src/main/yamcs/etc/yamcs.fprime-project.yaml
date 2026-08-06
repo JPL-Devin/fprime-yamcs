@@ -33,7 +33,7 @@ services:
   # FPRIME_DOWNLINK_DIR - Directory to mirror downloaded files
   # Set by: export FPRIME_DOWNLINK_DIR=/custom/downlink/path
 
-  - class: com.example.myproject.FprimeFilePacketService
+  - class: org.fprime.yamcs.filetransfer.FprimeFilePacketService
     args:
       inStream: tm_realtime
       bucket: fprimeFilesIn
@@ -55,7 +55,7 @@ dataLinks:
         ocfPresent: false
         service: "PACKET"
         maxPacketLength: 1024
-        packetPreprocessorClassName: com.example.myproject.FprimePacketPreprocessor
+        packetPreprocessorClassName: org.fprime.yamcs.tctm.FprimePacketPreprocessor
         stream: "tm_realtime"
 
   - name: UDP_TC_OUT
@@ -70,7 +70,7 @@ dataLinks:
         ocfPresent: false
         service: "PACKET"
         priority: 1
-        commandPostprocessorClassName: com.example.myproject.FprimeCommandPostprocessor
+        commandPostprocessorClassName: org.fprime.yamcs.tctm.FprimeCommandPostprocessor
         stream: "tc_realtime"
         useCop1: false
 
