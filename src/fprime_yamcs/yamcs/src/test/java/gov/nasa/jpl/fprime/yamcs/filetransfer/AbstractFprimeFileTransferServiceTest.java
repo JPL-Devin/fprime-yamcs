@@ -116,7 +116,55 @@ public class AbstractFprimeFileTransferServiceTest {
 
         FileTransferFilter limited = new FileTransferFilter();
         limited.limit = 1;
-        assertEquals(1, service.getTransfers(limited).size());
+        // Newest first (default descending): the limit keeps the most recent.
+        assertEquals(List.of(down), service.getTransfers(limited));
+
+        FileTransferFilter ascending = new FileTransferFilter();
+        ascending.descending = false;
+        assertEquals(List.of(up, down), service.getTransfers(ascending));
+    }
+
+    @Test
+    public void getTransfersFiltersByEntityIdsAndTimeWindow() {
+        FprimeFileTransfer a = transfer(TransferDirection.UPLOAD);
+        a.setEntityIds(1L, 2L);
+        FprimeFileTransfer b = transfer(TransferDirection.UPLOAD);
+        b.setEntityIds(3L, 4L);
+        service.addTransfer(a);
+        service.addTransfer(b);
+
+        FileTransferFilter byLocal = new FileTransferFilter();
+        byLocal.localEntityId = 1L;
+        assertEquals(List.of(a), service.getTransfers(byLocal));
+
+        FileTransferFilter byRemote = new FileTransferFilter();
+        byRemote.remoteEntityId = 4L;
+        assertEquals(List.of(b), service.getTransfers(byRemote));
+
+        FileTransferFilter futureWindow = new FileTransferFilter();
+        futureWindow.start = a.getCreationTime() + 3_600_000L;
+        assertEquals(List.of(), service.getTransfers(futureWindow));
+
+        FileTransferFilter pastWindow = new FileTransferFilter();
+        pastWindow.stop = a.getCreationTime() - 3_600_000L;
+        assertEquals(List.of(), service.getTransfers(pastWindow));
+
+        FileTransferFilter openWindow = new FileTransferFilter();
+        openWindow.start = a.getCreationTime() - 3_600_000L;
+        openWindow.stop = a.getCreationTime() + 3_600_000L;
+        assertEquals(List.of(b, a), service.getTransfers(openWindow));
+    }
+
+    @Test
+    public void fetchObjectTranslatesAsyncFailuresToIoException() throws Exception {
+        FakeBucket bucket = new FakeBucket();
+        bucket.objects.put("obj", new byte[] { 1, 2 });
+        assertEquals(2, AbstractFprimeFileTransferService.fetchObject(bucket, "obj").length);
+
+        bucket.failGets = true;
+        java.io.IOException e = assertThrows(java.io.IOException.class,
+                () -> AbstractFprimeFileTransferService.fetchObject(bucket, "obj"));
+        assertTrue(e.getMessage().contains("read error"));
     }
 
     @Test

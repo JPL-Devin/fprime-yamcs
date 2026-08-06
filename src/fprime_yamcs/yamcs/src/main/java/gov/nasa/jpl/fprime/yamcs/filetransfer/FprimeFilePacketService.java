@@ -59,6 +59,13 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  * {@link UplinkTransport}. Any YAMCS TC data link works — a CCSDS TC frame
  * virtual channel (TM/TC pipeline) or a raw space packet link.
  *
+ * <p><b>Remote file listing</b>: {@link #fetchFileList} synthesizes an F´
+ * {@code FileManager.ListDirectory} command and {@link RemoteFileListingHandler}
+ * reassembles the directory contents from the resulting F´ events. This
+ * requires the {@code fprime-yamcs-events} publisher to be running (it
+ * republishes F´ events onto the {@code events_realtime} stream this service
+ * subscribes to); without it, listings time out and are reported failed.
+ *
  * <p>Protocol limitations (inherent to {@code Fw::FilePacket}):
  * <ul>
  *   <li>One in-flight downlink transfer at a time
@@ -77,7 +84,9 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *       uplinkLink: UDP_TC_OUT.vc1     # YAMCS TC link to route through
  *       uplinkChunkSize: 128           # bytes per Fw::FilePacket DataPacket
  *       interPacketDelayMs: 20         # pacing delay between uplink packets
- *       downlinkMirrorDir: /tmp/fprime-downlink  # local mirror (default; "" disables)
+ *       downlinkMirrorDir: ""          # optional local mirror (default off; set a
+ *                                      # service-owned directory to enable — avoid
+ *                                      # world-writable locations like /tmp)
  *       maxFileSize: 268435456         # downlink allocation cap in bytes
  *       downloadTimeoutMs: 30000       # max wait for the F´ Start packet
  *       fileDownlinkCommand: ""        # qualified MDB name; auto-discovered
@@ -163,8 +172,10 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         spec.addOption("maxFileSize", OptionType.INTEGER).withDefault(DEFAULT_MAX_FILE_SIZE);
         // Mirroring defaults on (matching historical behavior); set to ""
         // to disable local filesystem mirroring of downlinked files.
-        spec.addOption("downlinkMirrorDir", OptionType.STRING)
-                .withDefault("/tmp/fprime-downlink");
+        // Mirroring defaults off: a world-writable default like /tmp could be
+        // pre-created as a symlink by a local attacker before service start.
+        // Point this at a directory owned by the YAMCS user to enable.
+        spec.addOption("downlinkMirrorDir", OptionType.STRING).withDefault("");
         // Route uplink through the YAMCS-configured TC data link. The
         // service accepts any TcDataLink and fails to start otherwise.
         spec.addOption("uplinkLink", OptionType.STRING).withDefault("UDP_TC_OUT.vc1");
@@ -194,7 +205,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         this.bucketName = config.getString("bucket", "fprimeFilesIn");
         this.fileApid = config.getInt("fileApid", DEFAULT_FILE_APID);
         this.maxFileSize = config.getInt("maxFileSize", DEFAULT_MAX_FILE_SIZE);
-        String mirror = config.getString("downlinkMirrorDir", "/tmp/fprime-downlink");
+        String mirror = config.getString("downlinkMirrorDir", "");
         this.downlinkMirrorDir = mirror.isEmpty() ? null : Paths.get(mirror);
         this.uplinkLinkName = config.getString("uplinkLink", "UDP_TC_OUT.vc1");
         this.uplinkChunkSize = config.getInt("uplinkChunkSize", 128);
@@ -514,6 +525,11 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
             destPath = sourcePath.contains("/")
                     ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1)
                     : sourcePath;
+            if (destPath.isEmpty()) {
+                throw new InvalidRequestException(
+                        "cannot derive a destination file name from '" + sourcePath
+                                + "'; specify destPath explicitly");
+            }
         }
 
         long id = nextTransferId();

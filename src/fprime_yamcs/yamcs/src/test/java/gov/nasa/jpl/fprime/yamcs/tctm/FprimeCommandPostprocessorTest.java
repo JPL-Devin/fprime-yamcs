@@ -90,6 +90,10 @@ public class FprimeCommandPostprocessorTest {
                 command(new byte[SpacePacket.PRIMARY_HEADER_LEN]));
 
         assertNull(result);
+        assertTrue(publisher.publishedKeys.contains(
+                CommandHistoryPublisher.AcknowledgeSent_KEY + "_Status"));
+        assertTrue(publisher.stringValues.contains(
+                CommandHistoryPublisher.AckStatus.NOK.toString()));
         assertTrue(publisher.stringValues.stream().anyMatch(v -> v.contains("shorter")));
     }
 
@@ -99,6 +103,10 @@ public class FprimeCommandPostprocessorTest {
                 new byte[SpacePacket.PRIMARY_HEADER_LEN + SpacePacket.MAX_PAYLOAD_LEN + 1]));
 
         assertNull(result);
+        assertTrue(publisher.publishedKeys.contains(
+                CommandHistoryPublisher.AcknowledgeSent_KEY + "_Status"));
+        assertTrue(publisher.stringValues.contains(
+                CommandHistoryPublisher.AckStatus.NOK.toString()));
         assertTrue(publisher.stringValues.stream().anyMatch(v -> v.contains("exceeds")));
     }
 }

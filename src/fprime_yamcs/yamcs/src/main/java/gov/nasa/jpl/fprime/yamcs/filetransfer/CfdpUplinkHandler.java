@@ -36,7 +36,11 @@ public class CfdpUplinkHandler {
     // CFDP transaction sequence number (16-bit, wraps) and CCSDS sequence
     // count (14-bit, wraps; may be re-patched by a link postprocessor).
     // Atomic so the handler is safe regardless of which executor runs it.
-    private final AtomicInteger transactionSeq = new AtomicInteger();
+    // Seeded from wall-clock seconds so a service restart does not reuse
+    // recent transaction numbers against a receiver correlating on
+    // (source entity, transaction seq).
+    private final AtomicInteger transactionSeq =
+            new AtomicInteger((int) ((System.currentTimeMillis() / 1000) & 0xFFFF));
     private final AtomicInteger seqCount = new AtomicInteger();
 
     public CfdpUplinkHandler(UplinkTransport transport, int cfdpApid, int chunkSize,

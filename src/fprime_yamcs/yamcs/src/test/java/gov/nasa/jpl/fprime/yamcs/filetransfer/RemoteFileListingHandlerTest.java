@@ -79,12 +79,23 @@ public class RemoteFileListingHandlerTest {
     @Test
     public void structuredArgsPreferredOverMessage() {
         handler.beginListing("/d");
-        feedStructured("DirectoryListing",
-                Map.of("dirName", "/d", "fileName", "x.bin", "fileSize", "7"));
+        // A conflicting parseable message rides along: the structured extra
+        // args must win.
+        Event evt = Event.newBuilder()
+                .setSource("test")
+                .setSeqNumber(0)
+                .setGenerationTime(0)
+                .setReceptionTime(0)
+                .setType("DirectoryListing")
+                .setMessage("[DirectoryListing] Directory /d: wrong.bin (3 bytes)")
+                .putAllExtra(Map.of("dirName", "/d", "fileName", "x.bin", "fileSize", "7"))
+                .build();
+        handler.onTuple(null, eventTuple(evt));
         feedStructured("ListDirectorySucceeded", Map.of("dirName", "/d"));
 
         ListFilesResponse listing = handler.getFileList("/d");
         assertEquals("completed", listing.getState());
+        assertEquals(1, listing.getFilesCount());
         assertEquals("x.bin", listing.getFiles(0).getName());
         assertEquals(7, listing.getFiles(0).getSize());
     }

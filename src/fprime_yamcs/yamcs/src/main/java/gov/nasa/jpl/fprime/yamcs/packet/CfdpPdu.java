@@ -147,6 +147,7 @@ public final class CfdpPdu {
     }
 
     public static Metadata decodeMetadata(byte[] bytes, Header header) {
+        require(header.type == Type.FILE_DIRECTIVE, "not a file directive PDU");
         // Confine every read to the header-declared data field so trailing
         // buffer padding is never silently parsed as PDU content.
         int end = header.dataOffset + header.dataFieldLength;
@@ -178,6 +179,7 @@ public final class CfdpPdu {
     }
 
     public static Eof decodeEof(byte[] bytes, Header header) {
+        require(header.type == Type.FILE_DIRECTIVE, "not a file directive PDU");
         int p = header.dataOffset + 1; // skip directive code
         require(header.dataFieldLength >= 1 + 1 + 4 + 4, "EOF PDU truncated");
         int conditionCode = (bytes[p] >> 4) & 0x0F;

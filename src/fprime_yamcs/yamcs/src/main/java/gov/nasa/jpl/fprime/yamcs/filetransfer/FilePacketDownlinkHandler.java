@@ -230,6 +230,11 @@ public class FilePacketDownlinkHandler {
             LOG.warn("Got END seq={} with no in-flight transfer", header.sequenceIndex);
             return;
         }
+        if (header.sequenceIndex <= inflight.lastSequenceIndex) {
+            LOG.warn("Dropping stale/duplicate END seq={} (last accepted {})",
+                    header.sequenceIndex, inflight.lastSequenceIndex);
+            return;
+        }
         int receivedChecksum = FilePacket.decodeEndChecksum(bytes, header.payloadOffset);
         if (inflight.bytesReceived != inflight.declaredSize) {
             failInflight(String.format(
@@ -263,14 +268,16 @@ public class FilePacketDownlinkHandler {
         // reassembly is complete and the next START may arrive immediately.
         // Bound the storage backlog so a fast TM stream cannot pin unbounded
         // memory in queued reassembly buffers.
-        if (pendingStores.get() >= MAX_PENDING_STORES) {
+        // Atomic reserve-then-rollback (same pattern as submitUplink): the
+        // bound must not depend on callers holding the handler monitor.
+        if (pendingStores.incrementAndGet() > MAX_PENDING_STORES) {
+            pendingStores.decrementAndGet();
             failInflight("storage backlog: " + MAX_PENDING_STORES
                     + " completed transfers already awaiting bucket writes");
             return;
         }
         Reassembly completed = inflight;
         inflight = null;
-        pendingStores.incrementAndGet();
         try {
             storageExecutor.execute(() -> {
                 try {

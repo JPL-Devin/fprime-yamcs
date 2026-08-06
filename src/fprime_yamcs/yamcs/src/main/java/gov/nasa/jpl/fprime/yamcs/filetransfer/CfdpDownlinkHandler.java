@@ -280,14 +280,16 @@ public class CfdpDownlinkHandler {
         // reassembly is complete and the next Metadata may arrive immediately.
         // Bound the storage backlog so a fast TM stream cannot pin unbounded
         // memory in queued reassembly buffers.
-        if (pendingStores.get() >= MAX_PENDING_STORES) {
+        // Atomic reserve-then-rollback (same pattern as submitUplink): the
+        // bound must not depend on callers holding the handler monitor.
+        if (pendingStores.incrementAndGet() > MAX_PENDING_STORES) {
+            pendingStores.decrementAndGet();
             failInflight("storage backlog: " + MAX_PENDING_STORES
                     + " completed transfers already awaiting bucket writes");
             return;
         }
         Reassembly completed = inflight;
         inflight = null;
-        pendingStores.incrementAndGet();
         try {
             storageExecutor.execute(() -> {
                 try {

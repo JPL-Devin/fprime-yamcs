@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
@@ -74,7 +75,9 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *       uplinkLink: UDP_TC_OUT.vc1     # YAMCS TC link to route through
  *       uplinkChunkSize: 128           # file bytes per File Data PDU
  *       interPacketDelayMs: 20         # pacing delay between uplink packets
- *       downlinkMirrorDir: /tmp/fprime-downlink  # local mirror (default; "" disables)
+ *       downlinkMirrorDir: ""          # optional local mirror (default off; set a
+ *                                      # service-owned directory to enable — avoid
+ *                                      # world-writable locations like /tmp)
  *       maxFileSize: 268435456         # downlink allocation cap in bytes
  *       fileDownlinkCommand: ""        # optional F´ command for startDownload
  *       sourceFileNameArg: sourceFileName  # downlink-command source-path argument name
@@ -148,10 +151,10 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         spec.addOption("localEntityId", OptionType.INTEGER).withDefault(1);
         spec.addOption("remoteEntityId", OptionType.INTEGER).withDefault(2);
         spec.addOption("maxFileSize", OptionType.INTEGER).withDefault(DEFAULT_MAX_FILE_SIZE);
-        // Mirroring defaults on (matching FprimeFilePacketService); set to
-        // "" to disable local filesystem mirroring of downlinked files.
-        spec.addOption("downlinkMirrorDir", OptionType.STRING)
-                .withDefault("/tmp/fprime-downlink");
+        // Mirroring defaults off: a world-writable default like /tmp could be
+        // pre-created as a symlink by a local attacker before service start.
+        // Point this at a directory owned by the YAMCS user to enable.
+        spec.addOption("downlinkMirrorDir", OptionType.STRING).withDefault("");
         spec.addOption("uplinkLink", OptionType.STRING).withDefault("UDP_TC_OUT.vc1");
         spec.addOption("uplinkChunkSize", OptionType.INTEGER).withDefault(128);
         spec.addOption("interPacketDelayMs", OptionType.INTEGER).withDefault(20);
@@ -175,7 +178,7 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         this.localEntityId = config.getInt("localEntityId", 1);
         this.remoteEntityId = config.getInt("remoteEntityId", 2);
         this.maxFileSize = config.getInt("maxFileSize", DEFAULT_MAX_FILE_SIZE);
-        String mirror = config.getString("downlinkMirrorDir", "/tmp/fprime-downlink");
+        String mirror = config.getString("downlinkMirrorDir", "");
         this.downlinkMirrorDir = mirror.isEmpty() ? null : Paths.get(mirror);
         this.uplinkLinkName = config.getString("uplinkLink", "UDP_TC_OUT.vc1");
         this.uplinkChunkSize = config.getInt("uplinkChunkSize", 128);
@@ -454,6 +457,11 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
             destPath = sourcePath.contains("/")
                     ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1)
                     : sourcePath;
+            if (destPath.isEmpty()) {
+                throw new InvalidRequestException(
+                        "cannot derive a destination file name from '" + sourcePath
+                                + "'; specify destPath explicitly");
+            }
         }
 
         long id = nextTransferId();
@@ -533,6 +541,16 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
 
     @Override
     public void notifyRemoteFileListMonitors(ListFilesResponse listing) {
+        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+    }
+
+    @Override
+    public void unregisterRemoteFileListMonitor(RemoteFileListMonitor monitor) {
+        throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
+    }
+
+    @Override
+    public Set<RemoteFileListMonitor> getRemoteFileListMonitors() {
         throw new InvalidRequestException("File listing is not supported by class-1 CFDP");
     }
 }

@@ -48,6 +48,10 @@ public class FprimeCommandPostprocessor implements CommandPostprocessor {
     // handles it. Must return the (possibly modified) packet binary.
     @Override
     public byte[] process(PreparedCommand pc) {
+        if (commandHistory == null) {
+            throw new IllegalStateException(
+                    "setCommandHistoryPublisher must be called before process");
+        }
         byte[] binary = pc.getBinary();
         if (binary == null || binary.length < SpacePacket.PRIMARY_HEADER_LEN + 1) {
             commandHistory.publishAck(pc.getCommandId(),

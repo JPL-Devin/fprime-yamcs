@@ -39,6 +39,7 @@ import org.yamcs.protobuf.EntityInfo;
 import org.yamcs.protobuf.ListFilesResponse;
 import org.yamcs.protobuf.TransferState;
 import org.yamcs.security.User;
+import org.yamcs.utils.TimeEncoding;
 import org.yamcs.xtce.MetaCommand;
 
 /**
@@ -137,14 +138,25 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     @Override
     public List<FileTransfer> getTransfers(FileTransferFilter filter) {
         List<FileTransfer> all = new ArrayList<>(transfers.values());
-        // Newest first: ConcurrentHashMap iteration order is arbitrary, and
-        // filter.limit must truncate to the most recent transfers.
-        all.sort(Comparator.comparingLong(FileTransfer::getId).reversed());
+        // Deterministic id order: ConcurrentHashMap iteration order is
+        // arbitrary, and filter.limit must truncate to the newest (or oldest,
+        // per filter.descending) transfers.
+        Comparator<FileTransfer> byId = Comparator.comparingLong(FileTransfer::getId);
         if (filter == null) {
+            all.sort(byId.reversed());
             return all;
         }
+        all.sort(filter.descending ? byId.reversed() : byId);
         List<FileTransfer> result = new ArrayList<>();
         for (FileTransfer ft : all) {
+            if (filter.start != TimeEncoding.INVALID_INSTANT
+                    && ft.getCreationTime() < filter.start) {
+                continue;
+            }
+            if (filter.stop != TimeEncoding.INVALID_INSTANT
+                    && ft.getCreationTime() >= filter.stop) {
+                continue;
+            }
             if (filter.direction != null && ft.getDirection() != filter.direction) {
                 continue;
             }

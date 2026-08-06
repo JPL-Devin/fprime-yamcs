@@ -4,9 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -14,6 +16,15 @@ public class DownlinkMirrorTest {
 
     @TempDir
     Path tmp;
+
+    /** Skips the test on platforms where symlink creation is unavailable. */
+    private static void createSymlinkOrSkip(Path link, Path target) {
+        try {
+            Files.createSymbolicLink(link, target);
+        } catch (IOException | UnsupportedOperationException e) {
+            Assumptions.assumeTrue(false, "symlinks not supported: " + e);
+        }
+    }
 
     @Test
     public void writesFileInsideMirrorRoot() throws Exception {
@@ -44,7 +55,7 @@ public class DownlinkMirrorTest {
         Path root = tmp.resolve("mirror");
         Path outside = Files.createDirectories(tmp.resolve("outside"));
         Files.createDirectories(root);
-        Files.createSymbolicLink(root.resolve("link"), outside);
+        createSymlinkOrSkip(root.resolve("link"), outside);
 
         DownlinkMirror.write(root, "link/escaped.bin", new byte[] { 1 });
 
@@ -56,7 +67,7 @@ public class DownlinkMirrorTest {
     public void refusesSymlinkedFileTarget() throws Exception {
         Path root = Files.createDirectories(tmp.resolve("mirror"));
         Path outsideFile = Files.createFile(tmp.resolve("victim.bin"));
-        Files.createSymbolicLink(root.resolve("file.bin"), outsideFile);
+        createSymlinkOrSkip(root.resolve("file.bin"), outsideFile);
 
         DownlinkMirror.write(root, "file.bin", new byte[] { 9 });
 

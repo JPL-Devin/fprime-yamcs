@@ -19,6 +19,9 @@ class FakeBucket implements Bucket {
     /** When true, every put fails — for storage failure-path tests. */
     boolean failPuts;
 
+    /** When true, every get fails — for uplink read failure-path tests. */
+    boolean failGets;
+
     @Override
     public BucketLocation getLocation() {
         return null;
@@ -60,6 +63,9 @@ class FakeBucket implements Bucket {
 
     @Override
     public CompletableFuture<byte[]> getObjectAsync(String objectName) {
+        if (failGets) {
+            return CompletableFuture.failedFuture(new java.io.IOException("read error"));
+        }
         return CompletableFuture.completedFuture(objects.get(objectName));
     }
 
