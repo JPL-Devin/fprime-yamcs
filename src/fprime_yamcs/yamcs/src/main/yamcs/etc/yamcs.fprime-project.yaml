@@ -33,7 +33,7 @@ services:
   # FPRIME_DOWNLINK_DIR - Directory to mirror downloaded files
   # Set by: export FPRIME_DOWNLINK_DIR=/custom/downlink/path
 
-  - class: org.fprime.yamcs.filetransfer.FprimeFilePacketService
+  - class: gov.nasa.jpl.fprime.yamcs.filetransfer.FprimeFilePacketService
     args:
       inStream: tm_realtime
       bucket: fprimeFilesIn
@@ -49,7 +49,7 @@ services:
   # used, attach it to a dedicated tc stream (e.g. tc_cfdp declared under
   # streamConfig) — a second link on tc_realtime would steal MDB commands
   # from the primary TC link.
-  #- class: org.fprime.yamcs.filetransfer.CfdpFileTransferService
+  #- class: gov.nasa.jpl.fprime.yamcs.filetransfer.CfdpFileTransferService
   #  args:
   #    inStream: tm_realtime
   #    bucket: cfdpFiles
@@ -73,7 +73,7 @@ dataLinks:
         ocfPresent: false
         service: "PACKET"
         maxPacketLength: 1024
-        packetPreprocessorClassName: org.fprime.yamcs.tctm.FprimePacketPreprocessor
+        packetPreprocessorClassName: gov.nasa.jpl.fprime.yamcs.tctm.FprimePacketPreprocessor
         stream: "tm_realtime"
 
   - name: UDP_TC_OUT
@@ -88,7 +88,7 @@ dataLinks:
         ocfPresent: false
         service: "PACKET"
         priority: 1
-        commandPostprocessorClassName: org.fprime.yamcs.tctm.FprimeCommandPostprocessor
+        commandPostprocessorClassName: gov.nasa.jpl.fprime.yamcs.tctm.FprimeCommandPostprocessor
         stream: "tc_realtime"
         useCop1: false
 
