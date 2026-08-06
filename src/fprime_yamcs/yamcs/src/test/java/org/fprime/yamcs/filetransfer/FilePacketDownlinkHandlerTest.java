@@ -160,18 +160,18 @@ public class FilePacketDownlinkHandlerTest {
     }
 
     @Test
-    public void sanitizeObjectNameRejectsUnsafePaths() {
-        assertEquals("a/b.bin", FilePacketDownlinkHandler.sanitizeObjectName("/a/b.bin"));
-        assertEquals("b.bin", FilePacketDownlinkHandler.sanitizeObjectName("b.bin"));
+    public void sanitizeRejectsUnsafePaths() {
+        assertEquals("a/b.bin", ObjectNames.sanitize("/a/b.bin"));
+        assertEquals("b.bin", ObjectNames.sanitize("b.bin"));
         assertThrows(IllegalArgumentException.class,
-                () -> FilePacketDownlinkHandler.sanitizeObjectName("/"));
+                () -> ObjectNames.sanitize("/"));
         assertThrows(IllegalArgumentException.class,
-                () -> FilePacketDownlinkHandler.sanitizeObjectName("/a/../b"));
+                () -> ObjectNames.sanitize("/a/../b"));
         assertThrows(IllegalArgumentException.class,
-                () -> FilePacketDownlinkHandler.sanitizeObjectName("../b"));
+                () -> ObjectNames.sanitize("../b"));
         assertThrows(IllegalArgumentException.class,
-                () -> FilePacketDownlinkHandler.sanitizeObjectName("a//b"));
+                () -> ObjectNames.sanitize("a//b"));
         assertThrows(IllegalArgumentException.class,
-                () -> FilePacketDownlinkHandler.sanitizeObjectName("./b"));
+                () -> ObjectNames.sanitize("./b"));
     }
 }

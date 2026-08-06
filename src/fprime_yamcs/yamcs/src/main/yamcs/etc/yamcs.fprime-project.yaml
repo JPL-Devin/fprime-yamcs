@@ -41,7 +41,22 @@ services:
       downloadTimeoutMs: 8000
       uplinkChunkSize: ${FPRIME_UPLINK_CHUNK_SIZE:512}
       downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:/tmp/runner/fprime-downlink}
-      
+
+  # Class-1 (unacknowledged) CFDP file transfer. Enable when the flight
+  # software carries CFDP PDUs in space packets on a dedicated APID. The
+  # uplinkLink may be a TC frame virtual channel (as below) or a raw
+  # space-packet link such as org.yamcs.tctm.UdpTcDataLink.
+  #- class: org.fprime.yamcs.filetransfer.CfdpFileTransferService
+  #  args:
+  #    inStream: tm_realtime
+  #    bucket: cfdpFiles
+  #    cfdpApid: 5
+  #    localEntityId: 1
+  #    remoteEntityId: 2
+  #    uplinkLink: UDP_TC_OUT.vc1
+  #    uplinkChunkSize: ${FPRIME_UPLINK_CHUNK_SIZE:512}
+  #    downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:/tmp/runner/fprime-downlink}
+
 dataLinks:
   - name: UDP_TM_IN
     class: org.yamcs.tctm.ccsds.UdpTmFrameLink

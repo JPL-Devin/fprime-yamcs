@@ -184,7 +184,7 @@ public class FilePacketDownlinkHandler {
 
         String objectName;
         try {
-            objectName = sanitizeObjectName(inflight.destinationPath);
+            objectName = ObjectNames.sanitize(inflight.destinationPath);
         } catch (IllegalArgumentException e) {
             LOG.error("Rejecting unsafe destination path '{}': {}",
                     inflight.destinationPath, e.getMessage());
@@ -223,28 +223,6 @@ public class FilePacketDownlinkHandler {
         } else {
             LOG.warn("Got CANCEL seq={} with no in-flight transfer", header.sequenceIndex);
         }
-    }
-
-    /**
-     * Turn the wire-supplied destination path into a bucket object key:
-     * strip the leading '/', and reject empty or '..'-bearing paths so a
-     * corrupt or malicious START cannot address objects outside the bucket
-     * namespace (or, via the mirror, outside the mirror directory).
-     */
-    static String sanitizeObjectName(String destinationPath) {
-        String name = destinationPath.startsWith("/")
-                ? destinationPath.substring(1)
-                : destinationPath;
-        if (name.isEmpty()) {
-            throw new IllegalArgumentException("empty destination path");
-        }
-        for (String segment : name.split("/", -1)) {
-            if (segment.isEmpty() || segment.equals(".") || segment.equals("..")) {
-                throw new IllegalArgumentException(
-                        "path contains empty, '.' or '..' segment: " + destinationPath);
-            }
-        }
-        return name;
     }
 
     private void mirrorToDirectory(String objectName, byte[] content) {

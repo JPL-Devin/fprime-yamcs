@@ -1,0 +1,272 @@
+package org.fprime.yamcs.packet;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+
+/**
+ * Codec for CCSDS File Delivery Protocol PDUs (CCSDS 727.0-B), restricted to
+ * the class-1 (unacknowledged) subset needed for F´ file transfer: Metadata,
+ * File Data, and EOF PDUs, with small (32-bit) file sizes, one-byte entity
+ * ids, two-byte transaction sequence numbers, and the modular checksum
+ * ({@link CfdpChecksum}).
+ *
+ * <p>All multi-byte fields are big-endian. Decoders validate every read
+ * against the buffer length and throw {@link IllegalArgumentException} on
+ * truncated or malformed PDUs.
+ */
+public final class CfdpPdu {
+
+    /** Fixed PDU header length with 1-byte entity ids and a 2-byte sequence number. */
+    public static final int HEADER_LEN = 8;
+
+    /** File directive codes (CCSDS 727.0-B table 5-4). */
+    public static final int DIRECTIVE_EOF = 0x04;
+    public static final int DIRECTIVE_FINISHED = 0x05;
+    public static final int DIRECTIVE_METADATA = 0x07;
+
+    /** Condition code: no error. */
+    public static final int CONDITION_NO_ERROR = 0;
+    /** Condition code: cancel request received. */
+    public static final int CONDITION_CANCEL_REQUEST = 0x0F;
+
+    /** PDU type per the decoded header. */
+    public enum Type {
+        FILE_DIRECTIVE, FILE_DATA
+    }
+
+    /** Decoded fixed PDU header. */
+    public static final class Header {
+        public final Type type;
+        public final boolean towardSender;
+        public final boolean acknowledged;
+        public final int dataFieldLength;
+        public final int sourceEntityId;
+        public final int transactionSeq;
+        public final int destinationEntityId;
+        /** Offset of the PDU data field within the source buffer. */
+        public final int dataOffset;
+
+        Header(Type type, boolean towardSender, boolean acknowledged, int dataFieldLength,
+               int sourceEntityId, int transactionSeq, int destinationEntityId, int dataOffset) {
+            this.type = type;
+            this.towardSender = towardSender;
+            this.acknowledged = acknowledged;
+            this.dataFieldLength = dataFieldLength;
+            this.sourceEntityId = sourceEntityId;
+            this.transactionSeq = transactionSeq;
+            this.destinationEntityId = destinationEntityId;
+            this.dataOffset = dataOffset;
+        }
+    }
+
+    /** Decoded Metadata PDU. */
+    public static final class Metadata {
+        public final int fileSize;
+        public final String sourceFileName;
+        public final String destinationFileName;
+
+        Metadata(int fileSize, String sourceFileName, String destinationFileName) {
+            this.fileSize = fileSize;
+            this.sourceFileName = sourceFileName;
+            this.destinationFileName = destinationFileName;
+        }
+    }
+
+    /** Decoded File Data PDU payload. */
+    public static final class FileData {
+        public final int offset;
+        public final int dataSize;
+        /** Offset of the file data within the source buffer. */
+        public final int dataStart;
+
+        FileData(int offset, int dataSize, int dataStart) {
+            this.offset = offset;
+            this.dataSize = dataSize;
+            this.dataStart = dataStart;
+        }
+    }
+
+    /** Decoded EOF PDU. */
+    public static final class Eof {
+        public final int conditionCode;
+        public final int checksum;
+        public final int fileSize;
+
+        Eof(int conditionCode, int checksum, int fileSize) {
+            this.conditionCode = conditionCode;
+            this.checksum = checksum;
+            this.fileSize = fileSize;
+        }
+    }
+
+    private CfdpPdu() {
+    }
+
+    // ------------------------------------------------------------------
+    // Decoding
+    // ------------------------------------------------------------------
+
+    /** Minimum length of a PDU this codec can decode. */
+    public static int minimumLength() {
+        return HEADER_LEN + 1;
+    }
+
+    /**
+     * Decode the fixed PDU header at {@code offset}. Only 1-byte entity ids
+     * and 2-byte transaction sequence numbers are accepted (the sizes this
+     * codec encodes).
+     */
+    public static Header decodeHeader(byte[] bytes, int offset) {
+        require(bytes.length - offset >= HEADER_LEN, "PDU too short for header");
+        int b0 = bytes[offset] & 0xFF;
+        int version = (b0 >> 5) & 0x07;
+        require(version == 0b001, "unsupported CFDP version " + version);
+        Type type = ((b0 >> 4) & 1) == 1 ? Type.FILE_DATA : Type.FILE_DIRECTIVE;
+        boolean towardSender = ((b0 >> 3) & 1) == 1;
+        boolean acknowledged = ((b0 >> 2) & 1) == 0;
+        int dataFieldLength = ByteBuffer.wrap(bytes).getShort(offset + 1) & 0xFFFF;
+        int b3 = bytes[offset + 3] & 0xFF;
+        int entityIdLen = ((b3 >> 4) & 0x07) + 1;
+        int seqLen = (b3 & 0x07) + 1;
+        require(entityIdLen == 1 && seqLen == 2,
+                "unsupported entity id/sequence lengths " + entityIdLen + "/" + seqLen);
+        int src = bytes[offset + 4] & 0xFF;
+        int seq = ByteBuffer.wrap(bytes).getShort(offset + 5) & 0xFFFF;
+        int dst = bytes[offset + 7] & 0xFF;
+        require(bytes.length - offset - HEADER_LEN >= dataFieldLength,
+                "PDU shorter than its data field length");
+        return new Header(type, towardSender, acknowledged, dataFieldLength,
+                src, seq, dst, offset + HEADER_LEN);
+    }
+
+    /** Read the directive code of a FILE_DIRECTIVE PDU. */
+    public static int directiveCode(byte[] bytes, Header header) {
+        require(header.type == Type.FILE_DIRECTIVE, "not a file directive PDU");
+        require(header.dataFieldLength >= 1, "empty directive PDU");
+        return bytes[header.dataOffset] & 0xFF;
+    }
+
+    public static Metadata decodeMetadata(byte[] bytes, Header header) {
+        int p = header.dataOffset + 1; // skip directive code
+        require(bytes.length - p >= 5, "Metadata PDU truncated");
+        // Byte after the directive code: closure requested + checksum type;
+        // both are informational for the class-1 modular-checksum subset.
+        int fileSize = ByteBuffer.wrap(bytes).getInt(p + 1);
+        int srcLenOffset = p + 5;
+        require(bytes.length - srcLenOffset >= 1, "Metadata source LV truncated");
+        int srcLen = bytes[srcLenOffset] & 0xFF;
+        require(bytes.length - (srcLenOffset + 1) >= srcLen + 1,
+                "Metadata source file name truncated");
+        String src = new String(bytes, srcLenOffset + 1, srcLen, StandardCharsets.US_ASCII);
+        int dstLenOffset = srcLenOffset + 1 + srcLen;
+        int dstLen = bytes[dstLenOffset] & 0xFF;
+        require(bytes.length - (dstLenOffset + 1) >= dstLen,
+                "Metadata destination file name truncated");
+        String dst = new String(bytes, dstLenOffset + 1, dstLen, StandardCharsets.US_ASCII);
+        return new Metadata(fileSize, src, dst);
+    }
+
+    public static FileData decodeFileData(byte[] bytes, Header header) {
+        require(header.type == Type.FILE_DATA, "not a file data PDU");
+        require(header.dataFieldLength >= 4, "File Data PDU truncated");
+        int offset = ByteBuffer.wrap(bytes).getInt(header.dataOffset);
+        int dataSize = header.dataFieldLength - 4;
+        return new FileData(offset, dataSize, header.dataOffset + 4);
+    }
+
+    public static Eof decodeEof(byte[] bytes, Header header) {
+        int p = header.dataOffset + 1; // skip directive code
+        require(header.dataFieldLength >= 1 + 1 + 4 + 4, "EOF PDU truncated");
+        int conditionCode = (bytes[p] >> 4) & 0x0F;
+        int checksum = ByteBuffer.wrap(bytes).getInt(p + 1);
+        int fileSize = ByteBuffer.wrap(bytes).getInt(p + 5);
+        return new Eof(conditionCode, checksum, fileSize);
+    }
+
+    // ------------------------------------------------------------------
+    // Encoding
+    // ------------------------------------------------------------------
+
+    /**
+     * Encode a class-1 Metadata PDU:
+     * {@code [header][0x07][flags/checksum type][fileSize U32][srcLV][dstLV]}.
+     */
+    public static byte[] encodeMetadata(int sourceEntityId, int destinationEntityId,
+                                        int transactionSeq, int fileSize,
+                                        String sourceFileName, String destinationFileName) {
+        byte[] src = sourceFileName.getBytes(StandardCharsets.US_ASCII);
+        byte[] dst = destinationFileName.getBytes(StandardCharsets.US_ASCII);
+        if (src.length > 255 || dst.length > 255) {
+            throw new IllegalArgumentException("File name too long");
+        }
+        int dataLen = 1 + 1 + 4 + 1 + src.length + 1 + dst.length;
+        ByteBuffer bb = ByteBuffer.allocate(HEADER_LEN + dataLen);
+        putHeader(bb, Type.FILE_DIRECTIVE, dataLen,
+                sourceEntityId, transactionSeq, destinationEntityId);
+        bb.put((byte) DIRECTIVE_METADATA);
+        bb.put((byte) 0); // closure not requested, modular checksum (type 0)
+        bb.putInt(fileSize);
+        bb.put((byte) src.length).put(src);
+        bb.put((byte) dst.length).put(dst);
+        return bb.array();
+    }
+
+    /**
+     * Encode a File Data PDU: {@code [header][offset U32][data]}.
+     */
+    public static byte[] encodeFileData(int sourceEntityId, int destinationEntityId,
+                                        int transactionSeq, int offset,
+                                        byte[] source, int srcOff, int len) {
+        int dataLen = 4 + len;
+        ByteBuffer bb = ByteBuffer.allocate(HEADER_LEN + dataLen);
+        putHeader(bb, Type.FILE_DATA, dataLen,
+                sourceEntityId, transactionSeq, destinationEntityId);
+        bb.putInt(offset);
+        bb.put(source, srcOff, len);
+        return bb.array();
+    }
+
+    /**
+     * Encode an EOF (no error) PDU:
+     * {@code [header][0x04][condition/spare][checksum U32][fileSize U32]}.
+     */
+    public static byte[] encodeEof(int sourceEntityId, int destinationEntityId,
+                                   int transactionSeq, int conditionCode,
+                                   int checksum, int fileSize) {
+        int dataLen = 1 + 1 + 4 + 4;
+        ByteBuffer bb = ByteBuffer.allocate(HEADER_LEN + dataLen);
+        putHeader(bb, Type.FILE_DIRECTIVE, dataLen,
+                sourceEntityId, transactionSeq, destinationEntityId);
+        bb.put((byte) DIRECTIVE_EOF);
+        bb.put((byte) ((conditionCode & 0x0F) << 4));
+        bb.putInt(checksum);
+        bb.putInt(fileSize);
+        return bb.array();
+    }
+
+    private static void putHeader(ByteBuffer bb, Type type, int dataFieldLength,
+                                  int sourceEntityId, int transactionSeq,
+                                  int destinationEntityId) {
+        if (dataFieldLength > 0xFFFF) {
+            throw new IllegalArgumentException(
+                    "PDU data field length " + dataFieldLength + " exceeds 65535");
+        }
+        // version 001 | type | direction: toward receiver | mode: unacknowledged
+        // | no CRC | small file
+        int b0 = (0b001 << 5) | ((type == Type.FILE_DATA ? 1 : 0) << 4) | (1 << 2);
+        bb.put((byte) b0);
+        bb.putShort((short) dataFieldLength);
+        // no segmentation control, 1-byte entity ids, no segment metadata,
+        // 2-byte sequence number
+        bb.put((byte) ((0 << 4) | 1));
+        bb.put((byte) sourceEntityId);
+        bb.putShort((short) transactionSeq);
+        bb.put((byte) destinationEntityId);
+    }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) {
+            throw new IllegalArgumentException(message);
+        }
+    }
+}

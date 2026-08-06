@@ -1,0 +1,110 @@
+package org.fprime.yamcs.filetransfer;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.yamcs.protobuf.TransferState;
+
+import org.fprime.yamcs.packet.CfdpChecksum;
+import org.fprime.yamcs.packet.CfdpPdu;
+import org.fprime.yamcs.packet.SpacePacket;
+
+/**
+ * Uplinks a file as a class-1 CFDP transaction (Metadata / File Data×N /
+ * EOF), wrapping each PDU in a CCSDS space packet on the CFDP APID and
+ * handing it to an {@link UplinkTransport}.
+ */
+public class CfdpUplinkHandler {
+
+    private static final Logger LOG = LoggerFactory.getLogger(CfdpUplinkHandler.class);
+
+    /**
+     * Largest chunk that keeps the File Data PDU within the CFDP 16-bit data
+     * field length and the resulting space packet within the CCSDS 16-bit
+     * length field: PDU header (8) + offset (4) + chunk.
+     */
+    public static final int MAX_CHUNK_SIZE = Math.min(0xFFFF - 4,
+            SpacePacket.MAX_PAYLOAD_LEN - CfdpPdu.HEADER_LEN - 4);
+
+    private final UplinkTransport transport;
+    private final int cfdpApid;
+    private final int chunkSize;
+    private final int localEntityId;
+    private final int remoteEntityId;
+    private final TransferEventListener listener;
+    // CFDP transaction sequence number (16-bit, wraps) and CCSDS sequence
+    // count (14-bit, wraps; may be re-patched by a link postprocessor).
+    private int transactionSeq = 0;
+    private int seqCount = 0;
+
+    public CfdpUplinkHandler(UplinkTransport transport, int cfdpApid, int chunkSize,
+                             int localEntityId, int remoteEntityId,
+                             TransferEventListener listener) {
+        if (chunkSize <= 0 || chunkSize > MAX_CHUNK_SIZE) {
+            throw new IllegalArgumentException(
+                    "chunkSize " + chunkSize + " outside [1, " + MAX_CHUNK_SIZE + "]");
+        }
+        this.transport = transport;
+        this.cfdpApid = cfdpApid;
+        this.chunkSize = chunkSize;
+        this.localEntityId = localEntityId;
+        this.remoteEntityId = remoteEntityId;
+        this.listener = listener;
+    }
+
+    /**
+     * Run the uplink transaction to completion, updating the transfer record
+     * as it progresses. Intended to run on a dedicated executor.
+     */
+    public void run(FprimeFileTransfer transfer, byte[] content) {
+        try {
+            transfer.setStartTime(System.currentTimeMillis());
+            int txSeq = nextTransactionSeq();
+            LOG.info("CFDP uplink START: id={} tx={} object={} -> {} ({} bytes)",
+                    transfer.getId(), txSeq, transfer.getObjectName(),
+                    transfer.getRemotePath(), content.length);
+
+            send(CfdpPdu.encodeMetadata(localEntityId, remoteEntityId, txSeq,
+                    content.length, transfer.getObjectName(), transfer.getRemotePath()));
+
+            for (int offset = 0; offset < content.length; offset += chunkSize) {
+                int len = Math.min(chunkSize, content.length - offset);
+                send(CfdpPdu.encodeFileData(localEntityId, remoteEntityId, txSeq,
+                        offset, content, offset, len));
+                transfer.setTransferredSize(offset + len);
+                listener.stateChanged(transfer);
+            }
+
+            send(CfdpPdu.encodeEof(localEntityId, remoteEntityId, txSeq,
+                    CfdpPdu.CONDITION_NO_ERROR, CfdpChecksum.of(content), content.length));
+
+            transfer.setTransferredSize(content.length);
+            transfer.setState(TransferState.COMPLETED);
+            LOG.info("CFDP uplink COMPLETE: id={} tx={} ({} bytes)",
+                    transfer.getId(), txSeq, content.length);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warn("CFDP uplink INTERRUPTED: id={} object={}",
+                    transfer.getId(), transfer.getObjectName());
+            transfer.setFailureReason("interrupted");
+            transfer.setState(TransferState.FAILED);
+        } catch (Exception e) {
+            LOG.error("CFDP uplink FAILED: id={} object={}",
+                    transfer.getId(), transfer.getObjectName(), e);
+            transfer.setFailureReason(e.getMessage() != null ? e.getMessage() : e.toString());
+            transfer.setState(TransferState.FAILED);
+        } finally {
+            listener.stateChanged(transfer);
+        }
+    }
+
+    private synchronized int nextTransactionSeq() {
+        int seq = transactionSeq;
+        transactionSeq = (transactionSeq + 1) & 0xFFFF;
+        return seq;
+    }
+
+    private void send(byte[] pdu) throws Exception {
+        transport.send(SpacePacket.wrapTelecommand(pdu, cfdpApid, seqCount));
+        seqCount = (seqCount + 1) & 0x3FFF;
+    }
+}
