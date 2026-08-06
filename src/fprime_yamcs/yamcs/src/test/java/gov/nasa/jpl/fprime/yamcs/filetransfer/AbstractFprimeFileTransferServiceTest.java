@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -234,8 +235,9 @@ public class AbstractFprimeFileTransferServiceTest {
     }
 
     @Test
-    public void monitorsNotifiedAndThrowingMonitorIsolated() {
-        List<FileTransfer> seen = new ArrayList<>();
+    public void monitorsNotifiedAndThrowingMonitorIsolated() throws Exception {
+        // Notifications are dispatched on the service's notifier thread.
+        List<FileTransfer> seen = Collections.synchronizedList(new ArrayList<>());
         TransferMonitor bad = t -> {
             throw new IllegalStateException("boom");
         };
@@ -245,12 +247,32 @@ public class AbstractFprimeFileTransferServiceTest {
 
         FprimeFileTransfer t = transfer(TransferDirection.UPLOAD);
         service.notifyStateChanged(t);
+        awaitSize(seen, 1);
         assertEquals(List.of(t), seen);
 
         service.unregisterTransferMonitor(bad);
         service.unregisterTransferMonitor(good);
         service.notifyStateChanged(t);
+        awaitNotifierIdle();
         assertEquals(1, seen.size());
+    }
+
+    private void awaitSize(List<?> list, int expected) throws Exception {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (list.size() < expected && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(expected, list.size());
+    }
+
+    /** Push a marker notification through the single-threaded notifier. */
+    private void awaitNotifierIdle() throws Exception {
+        List<FileTransfer> marker = Collections.synchronizedList(new ArrayList<>());
+        TransferMonitor m = marker::add;
+        service.registerTransferMonitor(m);
+        service.notifyStateChanged(transfer(TransferDirection.UPLOAD));
+        awaitSize(marker, 1);
+        service.unregisterTransferMonitor(m);
     }
 
     @Test

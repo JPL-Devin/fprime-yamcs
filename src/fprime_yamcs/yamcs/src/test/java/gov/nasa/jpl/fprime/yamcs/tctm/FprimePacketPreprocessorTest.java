@@ -6,12 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.util.Map;
 import java.util.Queue;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.yamcs.TmPacket;
+import org.yamcs.YConfiguration;
 import org.yamcs.events.EventProducerFactory;
 import org.yamcs.utils.TimeEncoding;
 import org.yamcs.yarch.protobuf.Db.Event;
@@ -100,6 +102,21 @@ public class FprimePacketPreprocessorTest {
         process(packet(APID_OTHER, 0x3FFF, 20));
         process(packet(APID_OTHER, 0, 20));
         assertEquals(0, events.size());
+    }
+
+    @Test
+    public void remappedEventApidHonoredViaConfig() {
+        preprocessor = new FprimePacketPreprocessor("test",
+                YConfiguration.wrap(Map.of("eventApid", 7)));
+        long fprimeSeconds = 1_000_000L;
+        byte[] bytes = packet(7, 1, EVENT_TIME_TAG_OFFSET + 8);
+        ByteBuffer bb = ByteBuffer.wrap(bytes);
+        bb.putInt(EVENT_TIME_TAG_OFFSET, (int) fprimeSeconds);
+        bb.putInt(EVENT_TIME_TAG_OFFSET + 4, 500_000); // microseconds
+
+        TmPacket result = process(bytes);
+        assertEquals(TimeEncoding.fromUnixMillisec(fprimeSeconds * 1000L + 500L),
+                result.getGenerationTime());
     }
 
     @Test

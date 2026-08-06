@@ -24,6 +24,9 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *     class: org.yamcs.tctm.UdpTmDataLink
  *     stream: tm_realtime
  *     packetPreprocessorClassName: gov.nasa.jpl.fprime.yamcs.tctm.FprimePacketPreprocessor
+ *     packetPreprocessorClassArgs:
+ *       eventApid: 2   # default; F´ ComCfg APID for events
+ *       tlmPktApid: 4  # default; F´ ComCfg APID for telemetry packets
  * </pre>
  */
 public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
@@ -47,9 +50,13 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
             + FwPacketDescriptorType_SIZE + FwEventIdType_SIZE
             + FwTimeBaseStoreType_SIZE + FwTimeContextStoreType_SIZE;
 
-    // APIDs
-    private static final int APID_EVENT = 2; // default F´ APID for events
-    private static final int APID_TLM_PKT = 4; // default F´ APID for telemetry packets
+    // Default F´ ComCfg APID assignments; configurable for deployments
+    // with re-mapped APIDs.
+    private static final int DEFAULT_APID_EVENT = 2;
+    private static final int DEFAULT_APID_TLM_PKT = 4;
+
+    private final int eventApid;
+    private final int tlmPktApid;
 
     // Impossible 14-bit sequence value marking a freshly seeded counter.
     private static final int FIRST_PACKET_SENTINEL = -1;
@@ -63,6 +70,8 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
     // (packetPreprocessorClassArgs)
     public FprimePacketPreprocessor(String yamcsInstance, YConfiguration config) {
         super(yamcsInstance, config);
+        this.eventApid = config.getInt("eventApid", DEFAULT_APID_EVENT);
+        this.tlmPktApid = config.getInt("tlmPktApid", DEFAULT_APID_TLM_PKT);
     }
 
     @Override
@@ -97,9 +106,9 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
         // tag layout (file packets, unknown packets) get local reception
         // time instead of misparsing arbitrary payload bytes as a time tag.
         int timeTagOffset = -1;
-        if (apid == APID_EVENT) {
+        if (apid == eventApid) {
             timeTagOffset = EVENT_TIME_TAG_OFFSET;
-        } else if (apid == APID_TLM_PKT) {
+        } else if (apid == tlmPktApid) {
             timeTagOffset = TLM_TIME_TAG_OFFSET;
         }
         if (timeTagOffset >= 0 && bytes.length >= timeTagOffset + 8) {

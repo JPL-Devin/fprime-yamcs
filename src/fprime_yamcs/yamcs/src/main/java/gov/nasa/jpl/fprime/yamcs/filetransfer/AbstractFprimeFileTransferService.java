@@ -14,6 +14,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -90,6 +92,16 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     private final Map<Long, FprimeFileTransfer> transfers = new ConcurrentHashMap<>();
     private final List<TransferMonitor> transferMonitors = new CopyOnWriteArrayList<>();
 
+    // Monitor callbacks run here rather than on the caller's thread: the
+    // callers are TM stream subscribers holding the downlink handler
+    // monitor, and a slow external monitor must not stall packet
+    // processing. Single-threaded so notifications stay ordered.
+    private final ExecutorService monitorNotifier = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "fprime-transfer-monitor-notifier");
+        t.setDaemon(true);
+        return t;
+    });
+
     /**
      * Callback handed to protocol handlers so they can report transfer
      * progress without the service exposing mutation entry points on its
@@ -130,14 +142,17 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     }
 
     private void evictOldTransfers() {
-        if (transfers.size() <= MAX_TRANSFER_HISTORY) {
+        // Snapshot the excess once: concurrent evictions could otherwise
+        // shrink the map between reads and hand Stream.limit a negative.
+        int excess = transfers.size() - MAX_TRANSFER_HISTORY;
+        if (excess <= 0) {
             return;
         }
         transfers.values().stream()
                 .filter(t -> t.getTransferState() == TransferState.COMPLETED
                         || t.getTransferState() == TransferState.FAILED)
                 .sorted(Comparator.comparingLong(FprimeFileTransfer::getId))
-                .limit(transfers.size() - MAX_TRANSFER_HISTORY)
+                .limit(excess)
                 .forEach(t -> transfers.remove(t.getId()));
     }
 
@@ -203,12 +218,21 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
 
     /** Push a transfer state change to all registered monitors. */
     protected void notifyStateChanged(FprimeFileTransfer transfer) {
-        for (TransferMonitor m : transferMonitors) {
-            try {
-                m.stateChanged(transfer);
-            } catch (Exception e) {
-                log.warn("Transfer monitor threw", e);
-            }
+        // Snapshot at submit time so the notification goes to the monitors
+        // registered when the state change happened.
+        List<TransferMonitor> recipients = new ArrayList<>(transferMonitors);
+        try {
+            monitorNotifier.execute(() -> {
+                for (TransferMonitor m : recipients) {
+                    try {
+                        m.stateChanged(transfer);
+                    } catch (Exception e) {
+                        log.warn("Transfer monitor threw", e);
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            log.debug("Dropping monitor notification after shutdown", e);
         }
     }
 
@@ -428,6 +452,9 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
                 failTransfer(t, AckStatus.NOK, reason);
             }
         }
+        // Let queued notifications (including the failures above) drain,
+        // then stop the notifier thread.
+        monitorNotifier.shutdown();
     }
 
     // ------------------------------------------------------------------

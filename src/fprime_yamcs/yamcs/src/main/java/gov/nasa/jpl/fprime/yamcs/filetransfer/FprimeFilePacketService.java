@@ -151,8 +151,8 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
     // FAILED. Runs on a separate single-thread scheduler so a slow uplink
     // can't block timeout enforcement.
     private ScheduledExecutorService timeoutScheduler;
-    private MetaCommand fileDownlinkCommand;   // may be null if not in MDB
-    private MetaCommand listDirectoryCommand;  // may be null if not in MDB
+    MetaCommand fileDownlinkCommand;   // may be null if not in MDB
+    MetaCommand listDirectoryCommand;  // may be null if not in MDB
 
     // ------------------------------------------------------------------
     // Spec / configuration
