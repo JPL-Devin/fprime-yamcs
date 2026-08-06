@@ -211,6 +211,22 @@ public class FilePacketDownlinkHandlerTest {
     }
 
     @Test
+    public void staleCancelIsIgnored() {
+        FilePacketDownlinkHandler h = handler(1024);
+        h.handleFilePacket(FilePacket.encodeStart(0, 10, "/src", "/f"), 0);
+        h.handleFilePacket(FilePacket.encodeData(1, 0, new byte[4], 0, 4), 0);
+        // Replayed CANCEL whose sequence does not advance past the last
+        // seen packet must not abort the in-flight transfer.
+        byte[] cancel = ByteBuffer.allocate(FilePacket.minimumLength())
+                .putShort((short) FilePacket.FILE_DESCRIPTOR)
+                .put((byte) FilePacket.Type.CANCEL.value)
+                .putInt(1)
+                .array();
+        h.handleFilePacket(cancel, 0);
+        assertEquals(TransferState.RUNNING, lastResolved.getTransferState());
+    }
+
+    @Test
     public void newStartSupersedesInflightTransfer() {
         FilePacketDownlinkHandler h = handler(1024);
         h.handleFilePacket(FilePacket.encodeStart(0, 10, "/src1", "/f1"), 0);

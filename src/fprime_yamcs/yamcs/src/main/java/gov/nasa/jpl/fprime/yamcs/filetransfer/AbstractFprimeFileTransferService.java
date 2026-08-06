@@ -134,7 +134,7 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     protected User systemUser;
 
     protected final RemoteFileListingHandler listingHandler =
-            new RemoteFileListingHandler(REMOTE_ENTITY_NAME);
+            new RemoteFileListingHandler(REMOTE_ENTITY_NAME, monitorNotifier);
 
     // ------------------------------------------------------------------
     // Transfer bookkeeping

@@ -55,7 +55,7 @@ services:
   #  args:
   #    inStream: tm_realtime
   #    bucket: cfdpFiles
-  #    cfdpApid: 5   # pick an APID unused by ComCfg (0x0005 is FW_PACKET_DP in the F´ default config)
+  #    cfdpApid: 16   # pick an APID unused by your deployment's ComCfg assignments
   #    localEntityId: 1
   #    remoteEntityId: 2
   #    uplinkLink: UDP_TC_OUT.vc1

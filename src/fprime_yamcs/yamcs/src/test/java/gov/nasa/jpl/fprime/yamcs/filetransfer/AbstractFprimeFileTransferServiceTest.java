@@ -304,6 +304,21 @@ public class AbstractFprimeFileTransferServiceTest {
         }
     }
 
+    @Test
+    public void releasedUplinkSlotsBecomeAvailableAgain() {
+        // Reserve every slot, release them all, then verify a fresh
+        // reservation succeeds: failed fetches must not leak slots.
+        for (int i = 0; i < AbstractFprimeFileTransferService.MAX_PENDING_UPLOADS; i++) {
+            service.reserveUplinkSlot();
+        }
+        assertThrows(InvalidRequestException.class, () -> service.reserveUplinkSlot());
+        for (int i = 0; i < AbstractFprimeFileTransferService.MAX_PENDING_UPLOADS; i++) {
+            service.releaseUplinkSlot();
+        }
+        service.reserveUplinkSlot();
+        service.releaseUplinkSlot();
+    }
+
     /** TestService with a fake command dispatcher for the download skeleton. */
     private static final class DispatchTestService extends TestService {
         final List<Map<String, Object>> dispatched = new ArrayList<>();

@@ -9,6 +9,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -80,6 +82,10 @@ public class RemoteFileListingHandler implements StreamSubscriber {
     static final int MAX_CACHED_LISTINGS = 64;
 
     private final String remoteEntityName;
+    // Listing-monitor callbacks are dispatched here rather than on the
+    // events-stream subscriber thread, so a slow monitor cannot stall
+    // event processing (same pattern as transfer-monitor notification).
+    private final Executor monitorNotifier;
     private final Map<String, ListingAccumulator> inProgressListings = new ConcurrentHashMap<>();
     private final Map<String, ListFilesResponse> fileListCache = Collections.synchronizedMap(
             new LinkedHashMap<>(16, 0.75f, true) {
@@ -91,8 +97,9 @@ public class RemoteFileListingHandler implements StreamSubscriber {
             });
     private final Set<RemoteFileListMonitor> monitors = new CopyOnWriteArraySet<>();
 
-    public RemoteFileListingHandler(String remoteEntityName) {
+    public RemoteFileListingHandler(String remoteEntityName, Executor monitorNotifier) {
         this.remoteEntityName = remoteEntityName;
+        this.monitorNotifier = monitorNotifier;
     }
 
     // ------------------------------------------------------------------
@@ -108,13 +115,16 @@ public class RemoteFileListingHandler implements StreamSubscriber {
         expireStaleListings();
         // Bound concurrent accumulators (symmetric with MAX_CACHED_LISTINGS)
         // so repeated fetches of distinct paths cannot grow the map until
-        // the expiry sweep.
-        if (!inProgressListings.containsKey(dirName)
-                && inProgressListings.size() >= MAX_CACHED_LISTINGS) {
-            throw new InvalidRequestException("Too many listings in progress ("
-                    + MAX_CACHED_LISTINGS + "); wait for one to complete or expire");
+        // the expiry sweep. Serialized so concurrent callers cannot slip
+        // past the bound (removals elsewhere only shrink the map).
+        synchronized (inProgressListings) {
+            if (!inProgressListings.containsKey(dirName)
+                    && inProgressListings.size() >= MAX_CACHED_LISTINGS) {
+                throw new InvalidRequestException("Too many listings in progress ("
+                        + MAX_CACHED_LISTINGS + "); wait for one to complete or expire");
+            }
+            inProgressListings.put(dirName, new ListingAccumulator(dirName));
         }
-        inProgressListings.put(dirName, new ListingAccumulator(dirName));
     }
 
     /**
@@ -133,7 +143,7 @@ public class RemoteFileListingHandler implements StreamSubscriber {
                 new ArrayList<>(inProgressListings.entrySet())) {
             if (now - entry.getValue().createdAt > LISTING_EXPIRY_MS) {
                 LOG.warn("Expiring stale listing of {} (no terminal event after {} ms)",
-                        entry.getKey(), LISTING_EXPIRY_MS);
+                        ObjectNames.forLog(entry.getKey()), LISTING_EXPIRY_MS);
                 completeListing(entry.getKey(), "failed");
             }
         }
@@ -168,12 +178,19 @@ public class RemoteFileListingHandler implements StreamSubscriber {
     }
 
     public void notifyMonitors(ListFilesResponse listing) {
-        for (RemoteFileListMonitor m : monitors) {
-            try {
-                m.receivedFileList(listing);
-            } catch (Exception e) {
-                LOG.warn("RemoteFileListMonitor threw", e);
-            }
+        List<RemoteFileListMonitor> recipients = new ArrayList<>(monitors);
+        try {
+            monitorNotifier.execute(() -> {
+                for (RemoteFileListMonitor m : recipients) {
+                    try {
+                        m.receivedFileList(listing);
+                    } catch (Exception e) {
+                        LOG.warn("RemoteFileListMonitor threw", e);
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            LOG.debug("Dropping listing notification after shutdown", e);
         }
     }
 
@@ -226,7 +243,8 @@ public class RemoteFileListingHandler implements StreamSubscriber {
                     // not a listing event
             }
         } catch (Exception e) {
-            LOG.warn("Error processing event type={} msg={}", type, msg, e);
+            LOG.warn("Error processing event type={} msg={}",
+                    ObjectNames.forLog(type), ObjectNames.forLog(msg), e);
         }
     }
 
@@ -253,7 +271,8 @@ public class RemoteFileListingHandler implements StreamSubscriber {
             }
             Matcher m = DIR_LISTING_RE.matcher(msg);
             if (!m.matches()) {
-                LOG.debug("DirectoryListing message did not match regex: {}", msg);
+                LOG.debug("DirectoryListing message did not match regex: {}",
+                        ObjectNames.forLog(msg));
                 return;
             }
             dir = m.group(1);
@@ -352,12 +371,14 @@ public class RemoteFileListingHandler implements StreamSubscriber {
     private void completeListing(String dir, String state) {
         ListingAccumulator acc = inProgressListings.remove(dir);
         if (acc == null) {
-            LOG.debug("completeListing({}): no accumulator (listing not ours?)", dir);
+            LOG.debug("completeListing({}): no accumulator (listing not ours?)",
+                    ObjectNames.forLog(dir));
             return;
         }
         ListFilesResponse response = acc.build(state);
         fileListCache.put(dir, response);
-        LOG.info("Listing of {} {}: {} entries", dir, state, response.getFilesCount());
+        LOG.info("Listing of {} {}: {} entries",
+                ObjectNames.forLog(dir), state, response.getFilesCount());
         notifyMonitors(response);
     }
 
@@ -400,7 +421,7 @@ public class RemoteFileListingHandler implements StreamSubscriber {
         private boolean hasCapacity() {
             if (entries.size() >= MAX_LISTING_ENTRIES) {
                 LOG.warn("Listing of {} exceeds {} entries; dropping further entries",
-                        dirName, MAX_LISTING_ENTRIES);
+                        ObjectNames.forLog(dirName), MAX_LISTING_ENTRIES);
                 return false;
             }
             return true;

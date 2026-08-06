@@ -244,6 +244,20 @@ public class CfdpDownlinkHandlerTest {
     }
 
     @Test
+    public void sameSeqMetadataWithDifferentFileSupersedes() {
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        FprimeFileTransfer first = lastResolved;
+        // Same 16-bit transaction seq but a different declared size and
+        // destination: a genuinely new (wrapped-seq) transaction, not a
+        // retransmitted duplicate. It must supersede the previous one.
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 20, "s2", "/other.bin"));
+        assertEquals(TransferState.FAILED, first.getTransferState());
+        assertTrue(first.getFailuredReason().contains("superseded"));
+        assertEquals(TransferState.RUNNING, lastResolved.getTransferState());
+    }
+
+    @Test
     public void acknowledgedModePduDropped() {
         CfdpDownlinkHandler h = handler(1024);
         byte[] pdu = CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin");

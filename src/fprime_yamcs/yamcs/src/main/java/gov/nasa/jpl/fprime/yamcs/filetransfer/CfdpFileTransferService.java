@@ -63,9 +63,9 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *     args:
  *       inStream: tm_realtime          # default
  *       bucket: cfdpFiles              # incoming bucket
- *       cfdpApid: 5                    # APID carrying CFDP PDUs; pick one
- *                                      # unused by ComCfg (0x0005 is
- *                                      # FW_PACKET_DP in the F´ default)
+ *       cfdpApid: 16                   # APID carrying CFDP PDUs; pick one
+ *                                      # unused by your deployment's ComCfg
+ *                                      # APID assignments
  *       localEntityId: 1               # ground CFDP entity id
  *       remoteEntityId: 2              # spacecraft CFDP entity id
  *       uplinkLink: UDP_TC_OUT.vc1     # YAMCS TC link to route through
@@ -96,7 +96,9 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
     // 256 MiB: bounds what a corrupt/malicious Metadata PDU can allocate.
     private static final int DEFAULT_MAX_FILE_SIZE = 256 * 1024 * 1024;
 
-    private static final int DEFAULT_CFDP_APID = 5;
+    // Outside the APIDs assigned by the F´ default ComCfg (0-5); must match
+    // the spacecraft-side CFDP APID and be overridden if 16 is in use.
+    private static final int DEFAULT_CFDP_APID = 16;
 
     private static final String TRANSFER_TYPE = "CFDP";
 

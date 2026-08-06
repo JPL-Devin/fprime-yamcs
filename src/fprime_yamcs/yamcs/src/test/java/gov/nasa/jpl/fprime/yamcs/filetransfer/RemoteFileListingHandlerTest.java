@@ -2,6 +2,7 @@ package gov.nasa.jpl.fprime.yamcs.filetransfer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -9,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.yamcs.filetransfer.InvalidRequestException;
 import org.yamcs.filetransfer.RemoteFileListMonitor;
 import org.yamcs.protobuf.ListFilesResponse;
 import org.yamcs.protobuf.RemoteFile;
@@ -19,7 +21,7 @@ import org.yamcs.yarch.protobuf.Db.Event;
 
 public class RemoteFileListingHandlerTest {
 
-    private final RemoteFileListingHandler handler = new RemoteFileListingHandler("fprime");
+    private final RemoteFileListingHandler handler = new RemoteFileListingHandler("fprime", Runnable::run);
 
     private static Tuple eventTuple(Event evt) {
         TupleDefinition tdef = new TupleDefinition();
@@ -50,6 +52,17 @@ public class RemoteFileListingHandlerTest {
                 .putAllExtra(extra)
                 .build();
         handler.onTuple(null, eventTuple(evt));
+    }
+
+    @Test
+    public void inProgressListingCountIsBounded() {
+        for (int i = 0; i < RemoteFileListingHandler.MAX_CACHED_LISTINGS; i++) {
+            handler.beginListing("/dir" + i);
+        }
+        assertThrows(InvalidRequestException.class,
+                () -> handler.beginListing("/overflow"));
+        // Refreshing an already-in-progress path is still allowed at the cap.
+        handler.beginListing("/dir0");
     }
 
     @Test
