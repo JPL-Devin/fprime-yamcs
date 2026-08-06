@@ -17,15 +17,29 @@ public class FilePacketUplinkHandler {
 
     private static final Logger LOG = LoggerFactory.getLogger(FilePacketUplinkHandler.class);
 
+    /**
+     * Largest chunk that keeps the DATA packet within the CCSDS 16-bit
+     * length field: descriptor (2) + header (5) + byteOffset (4) +
+     * dataSize (2) + chunk must not exceed {@link SpacePacket#MAX_PAYLOAD_LEN}.
+     */
+    public static final int MAX_CHUNK_SIZE = SpacePacket.MAX_PAYLOAD_LEN
+            - FilePacket.DESCRIPTOR_LEN - FilePacket.HEADER_LEN - 4 - 2;
+
     private final UplinkTransport transport;
     private final int fileApid;
     private final int chunkSize;
     private final TransferEventListener listener;
+    // CCSDS sequence count for uplinked packets (14-bit, wraps). A command
+    // postprocessor (e.g. FprimeCommandPostprocessor with CcsdsSeqCountFiller)
+    // may re-patch this in place on links that have one configured; setting a
+    // real count here keeps raw links without a postprocessor coherent too.
+    private int seqCount = 0;
 
     public FilePacketUplinkHandler(UplinkTransport transport, int fileApid, int chunkSize,
                                    TransferEventListener listener) {
-        if (chunkSize <= 0) {
-            throw new IllegalArgumentException("chunkSize must be positive");
+        if (chunkSize <= 0 || chunkSize > MAX_CHUNK_SIZE) {
+            throw new IllegalArgumentException(
+                    "chunkSize " + chunkSize + " outside [1, " + MAX_CHUNK_SIZE + "]");
         }
         this.transport = transport;
         this.fileApid = fileApid;
@@ -65,6 +79,14 @@ public class FilePacketUplinkHandler {
             transfer.setState(TransferState.COMPLETED);
             LOG.info("Uplink COMPLETE: id={} object={} ({} bytes)",
                     transfer.getId(), transfer.getObjectName(), content.length);
+        } catch (InterruptedException e) {
+            // Service shutdown (executor.shutdownNow()); restore the flag so
+            // the executor thread observes the interrupt.
+            Thread.currentThread().interrupt();
+            LOG.warn("Uplink INTERRUPTED: id={} object={}",
+                    transfer.getId(), transfer.getObjectName());
+            transfer.setFailureReason("interrupted");
+            transfer.setState(TransferState.FAILED);
         } catch (Exception e) {
             LOG.error("Uplink FAILED: id={} object={}",
                     transfer.getId(), transfer.getObjectName(), e);
@@ -76,8 +98,7 @@ public class FilePacketUplinkHandler {
     }
 
     private void send(byte[] filePacket) throws Exception {
-        // The sequence count field is patched by the link's command
-        // postprocessor; zero is a placeholder.
-        transport.send(SpacePacket.wrapTelecommand(filePacket, fileApid, 0));
+        transport.send(SpacePacket.wrapTelecommand(filePacket, fileApid, seqCount));
+        seqCount = (seqCount + 1) & 0x3FFF;
     }
 }

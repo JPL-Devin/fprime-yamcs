@@ -39,7 +39,7 @@ public class RemoteFileListingHandler implements StreamSubscriber {
     private static final Logger LOG = LoggerFactory.getLogger(RemoteFileListingHandler.class);
 
     /**
-     * F´ event format strings from {@code lib/fprime/Svc/FileManager/Events.fppi},
+     * F´ event format strings from {@code Svc/FileManager/Events.fppi} in nasa/fprime,
      * with the {@code [EventName]} prefix that fprime-yamcs-events prepends
      * before publishing to YAMCS. These are the canonical formats — the regex
      * parser is coupled to this format and must be updated if F´ changes the

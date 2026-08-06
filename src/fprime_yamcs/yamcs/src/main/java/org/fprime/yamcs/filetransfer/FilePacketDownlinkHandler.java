@@ -41,6 +41,7 @@ public class FilePacketDownlinkHandler {
     private final Path mirrorDir;
     private final TransferResolver transferResolver;
     private final TransferEventListener listener;
+    private final int maxFileSize;
 
     // In-flight downlink reassembly. Null means idle. Only touched from the
     // TM stream subscriber thread.
@@ -63,11 +64,25 @@ public class FilePacketDownlinkHandler {
         }
     }
 
-    public FilePacketDownlinkHandler(Bucket bucket, Path mirrorDir,
+    /**
+     * @param bucket           destination bucket for reassembled files
+     * @param mirrorDir        optional local mirror directory (null disables)
+     * @param maxFileSize      largest START-declared file size accepted, in
+     *                         bytes; bounds the reassembly buffer allocation
+     *                         so a corrupt/malicious START cannot exhaust
+     *                         ground-server memory
+     * @param transferResolver supplies the API transfer record for a START
+     * @param listener         receives transfer state changes
+     */
+    public FilePacketDownlinkHandler(Bucket bucket, Path mirrorDir, int maxFileSize,
                                      TransferResolver transferResolver,
                                      TransferEventListener listener) {
+        if (maxFileSize <= 0) {
+            throw new IllegalArgumentException("maxFileSize must be positive");
+        }
         this.bucket = bucket;
-        this.mirrorDir = mirrorDir;
+        this.mirrorDir = mirrorDir == null ? null : mirrorDir.normalize();
+        this.maxFileSize = maxFileSize;
         this.transferResolver = transferResolver;
         this.listener = listener;
     }
@@ -77,12 +92,13 @@ public class FilePacketDownlinkHandler {
      * {@code offset} within {@code bytes}.
      */
     public void handleFilePacket(byte[] bytes, int offset) {
-        FilePacket.Header header = FilePacket.decodeHeader(bytes, offset);
-        if (header.type == null) {
-            LOG.warn("Unknown FilePacket type {} at seq {}", header.rawType, header.sequenceIndex);
-            return;
-        }
         try {
+            FilePacket.Header header = FilePacket.decodeHeader(bytes, offset);
+            if (header.type == null) {
+                LOG.warn("Unknown FilePacket type {} at seq {}",
+                        header.rawType, header.sequenceIndex);
+                return;
+            }
             switch (header.type) {
                 case START:
                     handleStart(bytes, header);
@@ -98,8 +114,7 @@ public class FilePacketDownlinkHandler {
                     break;
             }
         } catch (Exception e) {
-            LOG.error("Error processing FilePacket type={} seq={}",
-                    header.type, header.sequenceIndex, e);
+            LOG.error("Error processing FilePacket", e);
             failInflight("packet processing error: " + e.getMessage());
         }
     }
@@ -112,6 +127,11 @@ public class FilePacketDownlinkHandler {
         FilePacket.StartPayload start = FilePacket.decodeStart(bytes, header.payloadOffset);
         LOG.info("File transfer START: seq={} size={} src={} dst={}",
                 header.sequenceIndex, start.fileSize, start.sourcePath, start.destinationPath);
+        if (start.fileSize < 0 || start.fileSize > maxFileSize) {
+            LOG.error("START declares file size {} outside [0, {}]; ignoring",
+                    start.fileSize, maxFileSize);
+            return;
+        }
 
         FprimeFileTransfer transfer = transferResolver.resolve(
                 start.sourcePath, start.destinationPath, start.fileSize);
@@ -128,7 +148,10 @@ public class FilePacketDownlinkHandler {
             return;
         }
         FilePacket.DataPayload data = FilePacket.decodeData(bytes, header.payloadOffset);
-        if (data.byteOffset < 0 || data.byteOffset + data.dataSize > inflight.declaredSize) {
+        // Long arithmetic: byteOffset is wire-controlled and int addition
+        // could wrap negative and slip past the comparison.
+        if (data.byteOffset < 0
+                || (long) data.byteOffset + data.dataSize > inflight.declaredSize) {
             LOG.error("DATA packet would overflow file: byteOffset={} dataSize={} declared={}",
                     data.byteOffset, data.dataSize, inflight.declaredSize);
             failInflight("overflow in DATA packet");
@@ -159,10 +182,15 @@ public class FilePacketDownlinkHandler {
             return;
         }
 
-        // Strip leading "/" from the destination so the bucket sees a relative key.
-        String objectName = inflight.destinationPath.startsWith("/")
-                ? inflight.destinationPath.substring(1)
-                : inflight.destinationPath;
+        String objectName;
+        try {
+            objectName = sanitizeObjectName(inflight.destinationPath);
+        } catch (IllegalArgumentException e) {
+            LOG.error("Rejecting unsafe destination path '{}': {}",
+                    inflight.destinationPath, e.getMessage());
+            failInflight("unsafe destination path: " + e.getMessage());
+            return;
+        }
         try {
             // putObjectAsync returns a CompletableFuture<Void>; block on it so
             // a single COMPLETE/FAILED line is logged per transfer instead of
@@ -195,6 +223,28 @@ public class FilePacketDownlinkHandler {
         } else {
             LOG.warn("Got CANCEL seq={} with no in-flight transfer", header.sequenceIndex);
         }
+    }
+
+    /**
+     * Turn the wire-supplied destination path into a bucket object key:
+     * strip the leading '/', and reject empty or '..'-bearing paths so a
+     * corrupt or malicious START cannot address objects outside the bucket
+     * namespace (or, via the mirror, outside the mirror directory).
+     */
+    static String sanitizeObjectName(String destinationPath) {
+        String name = destinationPath.startsWith("/")
+                ? destinationPath.substring(1)
+                : destinationPath;
+        if (name.isEmpty()) {
+            throw new IllegalArgumentException("empty destination path");
+        }
+        for (String segment : name.split("/", -1)) {
+            if (segment.isEmpty() || segment.equals(".") || segment.equals("..")) {
+                throw new IllegalArgumentException(
+                        "path contains empty, '.' or '..' segment: " + destinationPath);
+            }
+        }
+        return name;
     }
 
     private void mirrorToDirectory(String objectName, byte[] content) {

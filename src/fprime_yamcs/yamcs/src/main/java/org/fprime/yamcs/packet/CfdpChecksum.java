@@ -4,7 +4,7 @@ package org.fprime.yamcs.packet;
  * CFDP modular checksum (CCSDS 727.0-B section 4.1.2), as used by both
  * {@code Fw::FilePacket} END packets and CFDP EOF PDUs.
  *
- * <p>Direct port of {@code lib/fprime/CFDP/Checksum/Checksum.cpp::update}.
+ * <p>Direct port of {@code CFDP/Checksum/Checksum.cpp::update} in nasa/fprime.
  */
 public final class CfdpChecksum {
 

@@ -48,6 +48,10 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
     private static final int APID_EVENT = 2; // default F´ APID for events
     private static final int APID_TLM_PKT = 4; // default F´ APID for telemetry packets
 
+    // TAI-UTC offset applied to F´ time tags, see
+    // https://docs.yamcs.org/yamcs-server-manual/general/time/
+    private static final int LEAP_SECONDS_OFFSET = 38;
+
     // Constructor used when this preprocessor is used without YAML configuration
     public FprimePacketPreprocessor(String yamcsInstance) {
         this(yamcsInstance, YConfiguration.emptyConfig());
@@ -85,22 +89,28 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
                             + " newseq: " + seq);
         }
 
-        int timeTagOffset = 0;
-        // Find time tags depending on APID
+        // Find time tags depending on APID. APIDs without a known F´ time
+        // tag layout (file packets, unknown packets) get local reception
+        // time instead of misparsing arbitrary payload bytes as a time tag.
+        int timeTagOffset = -1;
         if (apid == APID_EVENT) {
             timeTagOffset = EVENT_TIME_TAG_OFFSET;
         } else if (apid == APID_TLM_PKT) {
             timeTagOffset = TLM_TIME_TAG_OFFSET;
         }
-        // Leap second handling, see
-        // https://docs.yamcs.org/yamcs-server-manual/general/time/
-        int leapSecondsOffset = 38;
-        ByteBuffer bb = ByteBuffer.wrap(bytes);
-        int timeSec = bb.getInt(timeTagOffset) + leapSecondsOffset;
-        int timeUsec = bb.getInt(timeTagOffset + 4); // seconds field is 4 bytes wide
-        long packetGenerationTime = (timeSec * 1000L) + (timeUsec / 1000L);
-
-        packet.setGenerationTime(packetGenerationTime);
+        if (timeTagOffset >= 0 && bytes.length >= timeTagOffset + 8) {
+            ByteBuffer bb = ByteBuffer.wrap(bytes);
+            int timeSec = bb.getInt(timeTagOffset) + LEAP_SECONDS_OFFSET;
+            int timeUsec = bb.getInt(timeTagOffset + 4); // seconds field is 4 bytes wide
+            packet.setGenerationTime((timeSec * 1000L) + (timeUsec / 1000L));
+        } else {
+            if (timeTagOffset >= 0) {
+                eventProducer.sendWarning("SHORT_PACKET",
+                        "Packet on APID " + apid + " too short for time tag (length "
+                                + bytes.length + "); using local time");
+            }
+            packet.setGenerationTime(System.currentTimeMillis());
+        }
 
         // Use the full 32 bits, so that both APID and the count are included.
         // Yamcs uses this attribute to uniquely identify the packet (together

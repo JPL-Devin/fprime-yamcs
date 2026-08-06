@@ -75,17 +75,22 @@ public class TcLinkUplinkTransport implements UplinkTransport {
      * happens on the stream-tuple round-trip path, which this bypasses.
      */
     @Override
-    public synchronized void send(byte[] spacePacket) throws Exception {
-        CommandId cmdId = CommandId.newBuilder()
-                .setGenerationTime(System.currentTimeMillis())
-                .setOrigin(origin)
-                .setSequenceNumber(commandSequence++)
-                .setCommandName(origin + "/uplinkPacket")
-                .build();
-        PreparedCommand pc = new PreparedCommand(cmdId);
-        pc.setBinary(spacePacket);
-        if (!link.sendCommand(pc)) {
-            throw new IllegalStateException("Link rejected packet (queue full or disabled)");
+    public void send(byte[] spacePacket) throws Exception {
+        // Lock only around the CommandId allocation and link submission —
+        // never across the pacing sleep, so concurrent users of a shared
+        // transport are not serialized behind a sleeping lock holder.
+        synchronized (this) {
+            CommandId cmdId = CommandId.newBuilder()
+                    .setGenerationTime(System.currentTimeMillis())
+                    .setOrigin(origin)
+                    .setSequenceNumber(commandSequence++)
+                    .setCommandName(origin + "/uplinkPacket")
+                    .build();
+            PreparedCommand pc = new PreparedCommand(cmdId);
+            pc.setBinary(spacePacket);
+            if (!link.sendCommand(pc)) {
+                throw new IllegalStateException("Link rejected packet (queue full or disabled)");
+            }
         }
         // Give the spacecraft-side accumulator a moment to drain between packets.
         if (interPacketDelayMs > 0) {

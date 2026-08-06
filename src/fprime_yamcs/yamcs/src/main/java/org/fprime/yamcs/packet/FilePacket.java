@@ -7,8 +7,13 @@ import java.nio.charset.StandardCharsets;
  * Codec for the F´ {@code Fw::FilePacket} wire format, prefixed with the
  * F´ {@code FwPacketDescriptorType} descriptor word.
  *
- * <p>Wire format reference: {@code lib/fprime/Fw/FilePacket/FilePacket.hpp}.
+ * <p>Wire format reference: {@code Fw/FilePacket/FilePacket.hpp} in
+ * <a href="https://github.com/nasa/fprime">nasa/fprime</a>.
  * All multi-byte fields are big-endian.
+ *
+ * <p>Decoders validate every read against the buffer length and throw
+ * {@link IllegalArgumentException} on truncated or malformed packets, so
+ * callers can reject bad wire input without trapping runtime exceptions.
  */
 public final class FilePacket {
 
@@ -101,6 +106,7 @@ public final class FilePacket {
      * it identifies an {@code Fw::FilePacket}.
      */
     public static boolean isFilePacket(byte[] bytes, int offset) {
+        require(bytes.length - offset >= DESCRIPTOR_LEN, "packet too short for descriptor");
         int descriptor = ByteBuffer.wrap(bytes).getShort(offset) & 0xFFFF;
         return descriptor == FILE_DESCRIPTOR;
     }
@@ -110,6 +116,7 @@ public final class FilePacket {
      * starting at {@code offset}.
      */
     public static Header decodeHeader(byte[] bytes, int offset) {
+        require(bytes.length - offset >= minimumLength(), "packet too short for header");
         int innerStart = offset + DESCRIPTOR_LEN;
         int rawType = bytes[innerStart] & 0xFF;
         int seqIndex = ByteBuffer.wrap(bytes).getInt(innerStart + 1);
@@ -117,25 +124,34 @@ public final class FilePacket {
     }
 
     public static StartPayload decodeStart(byte[] bytes, int payloadOffset) {
+        require(bytes.length - payloadOffset >= 5, "START payload truncated");
         ByteBuffer bb = ByteBuffer.wrap(bytes);
         int fileSize = bb.getInt(payloadOffset);
         int srcLen = bytes[payloadOffset + 4] & 0xFF;
+        require(bytes.length - (payloadOffset + 5) >= srcLen + 1,
+                "START source path truncated");
         String src = new String(bytes, payloadOffset + 5, srcLen, StandardCharsets.US_ASCII);
         int dstLenOffset = payloadOffset + 5 + srcLen;
         int dstLen = bytes[dstLenOffset] & 0xFF;
+        require(bytes.length - (dstLenOffset + 1) >= dstLen,
+                "START destination path truncated");
         String dst = new String(bytes, dstLenOffset + 1, dstLen, StandardCharsets.US_ASCII);
         return new StartPayload(fileSize, src, dst);
     }
 
     public static DataPayload decodeData(byte[] bytes, int payloadOffset) {
+        require(bytes.length - payloadOffset >= 6, "DATA payload truncated");
         ByteBuffer bb = ByteBuffer.wrap(bytes);
         int byteOffset = bb.getInt(payloadOffset);
         int dataSize = bb.getShort(payloadOffset + 4) & 0xFFFF;
+        require(bytes.length - (payloadOffset + 6) >= dataSize,
+                "DATA packet shorter than its dataSize field");
         return new DataPayload(byteOffset, dataSize, payloadOffset + 6);
     }
 
     /** Decode the checksum carried by an END packet. */
     public static int decodeEndChecksum(byte[] bytes, int payloadOffset) {
+        require(bytes.length - payloadOffset >= 4, "END payload truncated");
         return ByteBuffer.wrap(bytes).getInt(payloadOffset);
     }
 
@@ -190,5 +206,11 @@ public final class FilePacket {
         bb.putShort((short) FILE_DESCRIPTOR);
         bb.put((byte) type.value);
         bb.putInt(seq);
+    }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) {
+            throw new IllegalArgumentException(message);
+        }
     }
 }

@@ -75,12 +75,19 @@ import org.fprime.yamcs.packet.SpacePacket;
  *       fileApid: 3                    # default; FW_PACKET_FILE
  *       uplinkLink: UDP_TC_OUT.vc1     # YAMCS TC link to route through
  *       uplinkChunkSize: 128           # bytes per Fw::FilePacket DataPacket
+ *       interPacketDelayMs: 20         # pacing delay between uplink packets
+ *       downlinkMirrorDir: /tmp/fprime-downlink  # local mirror (default)
+ *       maxFileSize: 268435456         # downlink allocation cap in bytes
  * </pre>
  */
 public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         implements StreamSubscriber {
 
-    // F´ ComCfg::Apid::FW_PACKET_FILE — see lib/fprime/default/config/ComCfg.fpp.
+    // 256 MiB: generously above any realistic Fw::FilePacket downlink while
+    // bounding what a corrupt/malicious START packet can allocate.
+    private static final int DEFAULT_MAX_FILE_SIZE = 256 * 1024 * 1024;
+
+    // F´ ComCfg::Apid::FW_PACKET_FILE — see default/config/ComCfg.fpp in nasa/fprime.
     private static final int DEFAULT_FILE_APID = 3;
 
     private static final String TRANSFER_TYPE = "FwFilePacket";
@@ -89,6 +96,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
     private String inStreamName;
     private String bucketName;
     private int fileApid;
+    private int maxFileSize;
     private Path downlinkMirrorDir;
     private String uplinkLinkName;
     private int uplinkChunkSize;
@@ -136,7 +144,11 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         spec.addOption("inStream", OptionType.STRING).withDefault("tm_realtime");
         spec.addOption("bucket", OptionType.STRING).withDefault("fprimeFilesIn");
         spec.addOption("fileApid", OptionType.INTEGER).withDefault(DEFAULT_FILE_APID);
-        spec.addOption("downlinkMirrorDir", OptionType.STRING).withDefault("");
+        spec.addOption("maxFileSize", OptionType.INTEGER).withDefault(DEFAULT_MAX_FILE_SIZE);
+        // Mirroring defaults on (matching historical behavior); set to ""
+        // to disable local filesystem mirroring of downlinked files.
+        spec.addOption("downlinkMirrorDir", OptionType.STRING)
+                .withDefault("/tmp/fprime-downlink");
         // Route uplink through the YAMCS-configured TC data link. The
         // service accepts any TcDataLink and fails to start otherwise.
         spec.addOption("uplinkLink", OptionType.STRING).withDefault("UDP_TC_OUT.vc1");
@@ -165,7 +177,8 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         this.inStreamName = config.getString("inStream", "tm_realtime");
         this.bucketName = config.getString("bucket", "fprimeFilesIn");
         this.fileApid = config.getInt("fileApid", DEFAULT_FILE_APID);
-        String mirror = config.getString("downlinkMirrorDir", "");
+        this.maxFileSize = config.getInt("maxFileSize", DEFAULT_MAX_FILE_SIZE);
+        String mirror = config.getString("downlinkMirrorDir", "/tmp/fprime-downlink");
         this.downlinkMirrorDir = mirror.isEmpty() ? null : Paths.get(mirror);
         this.uplinkLinkName = config.getString("uplinkLink", "UDP_TC_OUT.vc1");
         this.uplinkChunkSize = config.getInt("uplinkChunkSize", 128);
@@ -213,9 +226,10 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
                     yamcsInstance, uplinkLinkName, getClass().getSimpleName(),
                     interPacketDelayMs);
             this.uplinkHandler = new FilePacketUplinkHandler(
-                    transport, fileApid, uplinkChunkSize, this);
+                    transport, fileApid, uplinkChunkSize, transferListener);
             this.downlinkHandler = new FilePacketDownlinkHandler(
-                    bucket, downlinkMirrorDir, this::resolveDownlinkTransfer, this);
+                    bucket, downlinkMirrorDir, maxFileSize,
+                    this::resolveDownlinkTransfer, transferListener);
 
             // Uplink worker: single-threaded so transfers serialize and the
             // space packet stream stays ordered.
@@ -374,8 +388,8 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
                     + "(command rejected? file missing? link down?)";
             t.setFailureReason(reason);
             t.setState(TransferState.FAILED);
-            stateChanged(t);
-            verifierAck(t, AckStatus.TIMEOUT, reason);
+            notifyStateChanged(t);
+            publishVerifierAck(t, AckStatus.TIMEOUT, reason);
         }
     }
 
@@ -412,7 +426,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
                 nextTransferId(), sourceBucket.getName(), objectName, dest,
                 content.length, TransferDirection.UPLOAD, TRANSFER_TYPE, false);
         addTransfer(transfer);
-        stateChanged(transfer);
+        notifyStateChanged(transfer);
 
         uplinkExecutor.submit(() -> uplinkHandler.run(transfer, content));
         return transfer;
@@ -464,7 +478,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         transfer.setStartTime(System.currentTimeMillis());
         addTransfer(transfer);
         pendingDownloadsByPath.put(destPath, transfer);
-        stateChanged(transfer);
+        notifyStateChanged(transfer);
 
         try {
             Map<String, Object> args = new HashMap<>();
@@ -476,7 +490,8 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
             // against this command's history entry as the transfer
             // progresses through RUNNING -> COMPLETED/FAILED.
             transfer.setTriggeringCommandId(cmdId);
-            verifierAck(transfer, AckStatus.SCHEDULED, "waiting for spacecraft Start packet");
+            publishVerifierAck(transfer, AckStatus.SCHEDULED,
+                    "waiting for spacecraft Start packet");
             log.info("Downlink START: id={} source={} (on F´) -> bucket {}/{}",
                     id, sourcePath, destBucket.getName(), destPath);
         } catch (Exception e) {

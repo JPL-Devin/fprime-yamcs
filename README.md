@@ -57,6 +57,24 @@ flowchart LR
 
 The bridge's integration tests (`tests/test_comm_bridge.py`) require `socat` to emulate a UART endpoint; without it only the unit tests run (the integration tests are skipped). CI environments running these tests should install `socat`.
 
+## YAMCS Java Plugin
+
+The Maven module under `src/fprime_yamcs/yamcs` provides the Java classes that YAMCS loads for F Prime support:
+
+- `org.fprime.yamcs.tctm.FprimePacketPreprocessor` — TM link preprocessor: CCSDS sequence-continuity checking and F´ time-tag extraction.
+- `org.fprime.yamcs.tctm.FprimeCommandPostprocessor` — TC link postprocessor: patches the CCSDS packet length and sequence count in outgoing command binaries.
+- `org.fprime.yamcs.filetransfer.FprimeFilePacketService` — a YAMCS `FileTransferService` implementing `Fw::FilePacket` file uplink and downlink. Downlinked files are stored in a YAMCS bucket (and optionally mirrored to a local directory via `downlinkMirrorDir`, default `/tmp/fprime-downlink`).
+
+The file transfer service routes uplink through the YAMCS data link named by the `uplinkLink` option. Any `TcDataLink` is accepted: a CCSDS TC frame virtual channel (e.g. `UDP_TC_OUT.vc1`, the default TM/TC pipeline) **or** a raw space-packet-only link such as `org.yamcs.tctm.UdpTcDataLink` — the service is not tied to the TC framing pipeline. See the `FprimeFilePacketService` class Javadoc for the full option list, and `src/fprime_yamcs/yamcs/src/main/yamcs/etc/yamcs.fprime-project.yaml` for a working configuration.
+
+Reusable protocol pieces (`org.fprime.yamcs.packet` codecs, `UplinkTransport`, `AbstractFprimeFileTransferService`) are shared infrastructure intended to also back future transfer protocols such as CFDP.
+
+Run the Java unit tests with:
+
+```
+mvn -f src/fprime_yamcs/yamcs/pom.xml test
+```
+
 ## Configuration 
 
 YAMCS is powerful and has many configuration properties. `fprime-yamcs` requires one instance of YAMCS defined in the configuration to have the following MDB:

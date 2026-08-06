@@ -1,6 +1,7 @@
 package org.fprime.yamcs.filetransfer;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,8 +41,7 @@ import org.yamcs.xtce.MetaCommand;
  * <p>Concrete services (Fw::FilePacket, CFDP, ...) supply the wire protocol:
  * how bytes get uplinked and how downlinked packets are reassembled.
  */
-public abstract class AbstractFprimeFileTransferService extends AbstractFileTransferService
-        implements TransferEventListener {
+public abstract class AbstractFprimeFileTransferService extends AbstractFileTransferService {
 
     protected final Logger log = LoggerFactory.getLogger(getClass());
 
@@ -54,9 +54,33 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     private static final String VERIFIER_KEY =
             CommandHistoryPublisher.Verifier_KEY_PREFIX + "FileTransfer";
 
+    /**
+     * Maximum retained transfer records. Terminal (completed/failed)
+     * transfers beyond this are evicted oldest-first so a chattering link
+     * cannot grow ground-server memory without bound.
+     */
+    protected static final int MAX_TRANSFER_HISTORY = 1000;
+
     private final AtomicLong transferIdSeq = new AtomicLong(1);
     private final Map<Long, FprimeFileTransfer> transfers = new ConcurrentHashMap<>();
     private final List<TransferMonitor> transferMonitors = new CopyOnWriteArrayList<>();
+
+    /**
+     * Callback handed to protocol handlers so they can report transfer
+     * progress without the service exposing mutation entry points on its
+     * public API.
+     */
+    protected final TransferEventListener transferListener = new TransferEventListener() {
+        @Override
+        public void stateChanged(FprimeFileTransfer transfer) {
+            notifyStateChanged(transfer);
+        }
+
+        @Override
+        public void verifierAck(FprimeFileTransfer transfer, AckStatus status, String message) {
+            publishVerifierAck(transfer, status, message);
+        }
+    };
 
     // Resolved by resolveProcessor() for spacecraft command synthesis.
     protected Processor processor;
@@ -77,6 +101,19 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
 
     protected void addTransfer(FprimeFileTransfer transfer) {
         transfers.put(transfer.getId(), transfer);
+        evictOldTransfers();
+    }
+
+    private void evictOldTransfers() {
+        if (transfers.size() <= MAX_TRANSFER_HISTORY) {
+            return;
+        }
+        transfers.values().stream()
+                .filter(t -> t.getTransferState() == TransferState.COMPLETED
+                        || t.getTransferState() == TransferState.FAILED)
+                .sorted(Comparator.comparingLong(FprimeFileTransfer::getId))
+                .limit(transfers.size() - MAX_TRANSFER_HISTORY)
+                .forEach(t -> transfers.remove(t.getId()));
     }
 
     @Override
@@ -125,8 +162,8 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
         transferMonitors.remove(monitor);
     }
 
-    @Override
-    public void stateChanged(FprimeFileTransfer transfer) {
+    /** Push a transfer state change to all registered monitors. */
+    protected void notifyStateChanged(FprimeFileTransfer transfer) {
         for (TransferMonitor m : transferMonitors) {
             try {
                 m.stateChanged(transfer);
@@ -143,8 +180,8 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
      *
      * <p>No-op if the transfer wasn't triggered by a synthesized command.
      */
-    @Override
-    public void verifierAck(FprimeFileTransfer transfer, AckStatus status, String message) {
+    protected void publishVerifierAck(FprimeFileTransfer transfer, AckStatus status,
+                                      String message) {
         if (commandHistoryPublisher == null) {
             return;
         }
@@ -164,8 +201,8 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     protected void failTransfer(FprimeFileTransfer transfer, AckStatus ackStatus, String reason) {
         transfer.setFailureReason(reason);
         transfer.setState(TransferState.FAILED);
-        stateChanged(transfer);
-        verifierAck(transfer, ackStatus, reason);
+        notifyStateChanged(transfer);
+        publishVerifierAck(transfer, ackStatus, reason);
     }
 
     // ------------------------------------------------------------------

@@ -11,6 +11,9 @@ public final class SpacePacket {
     /** CCSDS Space Packet primary header length in bytes. */
     public static final int PRIMARY_HEADER_LEN = 6;
 
+    /** Maximum packet data field length (16-bit length field, minus-one encoding). */
+    public static final int MAX_PAYLOAD_LEN = 65536;
+
     /** Offset of the 16-bit packet data length field in the primary header. */
     public static final int LENGTH_FIELD_OFFSET = 4;
 
@@ -31,11 +34,17 @@ public final class SpacePacket {
      * Wrap a payload in a CCSDS space packet with the telecommand type flag
      * set, no secondary header, and standalone sequence flags.
      *
-     * @param payload  packet data field content
+     * @param payload  packet data field content, 1 to {@link #MAX_PAYLOAD_LEN} bytes
      * @param apid     11-bit application process identifier
      * @param seqCount 14-bit sequence count
+     * @throws IllegalArgumentException if the payload cannot be represented
+     *         in the 16-bit length field
      */
     public static byte[] wrapTelecommand(byte[] payload, int apid, int seqCount) {
+        if (payload.length < 1 || payload.length > MAX_PAYLOAD_LEN) {
+            throw new IllegalArgumentException(
+                    "payload length " + payload.length + " outside [1, " + MAX_PAYLOAD_LEN + "]");
+        }
         ByteBuffer bb = ByteBuffer.allocate(PRIMARY_HEADER_LEN + payload.length);
         // Word 0: 3b version(0) | 1b type(1 = TC) | 1b secHdr(0) | 11b APID
         int packetId = (1 << 12) | (apid & 0x07FF);
