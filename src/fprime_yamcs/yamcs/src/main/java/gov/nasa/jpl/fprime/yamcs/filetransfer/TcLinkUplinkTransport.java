@@ -73,6 +73,9 @@ public class TcLinkUplinkTransport implements UplinkTransport {
             throw new IllegalStateException("uplinkLink config option is required");
         }
         YamcsServerInstance instance = YamcsServer.getServer().getInstance(yamcsInstance);
+        if (instance == null) {
+            throw new IllegalStateException("YAMCS instance '" + yamcsInstance + "' not found");
+        }
         Link link = instance.getLinkManager().getLink(linkName);
         if (!(link instanceof TcDataLink)) {
             String what = link == null ? "not found"

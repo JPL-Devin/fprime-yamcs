@@ -400,6 +400,19 @@ public class AbstractFprimeFileTransferServiceTest {
     }
 
     @Test
+    public void startDownloadRejectedWhenPendingCapReached() throws Exception {
+        DispatchTestService svc = new DispatchTestService();
+        FakeBucket bucket = new FakeBucket();
+        for (int i = 0; i < AbstractFprimeFileTransferService.MAX_PENDING_DOWNLOADS; i++) {
+            svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
+                    "f" + i + ".bin", bucket, null, "src", "dst", "Start packet");
+        }
+        assertThrows(org.yamcs.filetransfer.InvalidRequestException.class,
+                () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
+                        "overflow.bin", bucket, null, "src", "dst", "Start packet"));
+    }
+
+    @Test
     public void sweepFailsOnlyTimedOutPendingDownloads() throws Exception {
         DispatchTestService svc = new DispatchTestService();
         FakeBucket bucket = new FakeBucket();

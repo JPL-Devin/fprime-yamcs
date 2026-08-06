@@ -25,14 +25,13 @@ services:
       command: ["fprime-yamcs-events"]
       restart: "always"
       logLevel: INFO
-  # Reassembles Fw::FilePacket downlinks (APID 3) into the fprimeFilesIn bucket.
-  
   # Environment variables to set before starting YAMCS
   # FPRIME_UPLINK_CHUNK_SIZE - Bytes per uplink data packet
   # Set by: export FPRIME_UPLINK_CHUNK_SIZE=1024
   # FPRIME_DOWNLINK_DIR - Directory to mirror downloaded files
   # Set by: export FPRIME_DOWNLINK_DIR=/custom/downlink/path
 
+  # Reassembles Fw::FilePacket downlinks (APID 3) into the fprimeFilesIn bucket.
   - class: gov.nasa.jpl.fprime.yamcs.filetransfer.FprimeFilePacketService
     args:
       inStream: tm_realtime
@@ -43,8 +42,6 @@ services:
       # Optional local mirror of downlinked files; leave unset (off) unless
       # pointed at a directory owned by the YAMCS user — world-writable
       # locations like /tmp can be symlink-attacked before service start.
-      # (Previously defaulted to /tmp/runner/fprime-downlink; set
-      # FPRIME_DOWNLINK_DIR to restore mirroring.)
       downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:}
 
   # Class-1 (unacknowledged) CFDP file transfer. Enable when the flight

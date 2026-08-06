@@ -81,7 +81,8 @@ public class CfdpUplinkHandlerTest {
         int firstTx = txOf(sent.get(0));
         sent.clear();
         h.run(transfer(10), new byte[10]);
-        assertEquals(firstTx + 1, txOf(sent.get(0)));
+        // The counter is 16-bit and time-seeded, so mask for the wrap case.
+        assertEquals((firstTx + 1) & 0xFFFF, txOf(sent.get(0)));
     }
 
     private static int txOf(byte[] pkt) {

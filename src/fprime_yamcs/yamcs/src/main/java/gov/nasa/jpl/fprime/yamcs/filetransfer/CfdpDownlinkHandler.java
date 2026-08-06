@@ -194,6 +194,8 @@ public class CfdpDownlinkHandler {
             if (inflight.transactionSeq == header.transactionSeq) {
                 // Retransmitted Metadata for the transaction already being
                 // reassembled: ignore the duplicate rather than restarting.
+                // It still counts as link activity for the stall sweeper.
+                inflightLastActivity = System.currentTimeMillis();
                 LOG.warn("Ignoring duplicate Metadata for in-flight transaction {}",
                         inflight.transactionSeq);
                 return;

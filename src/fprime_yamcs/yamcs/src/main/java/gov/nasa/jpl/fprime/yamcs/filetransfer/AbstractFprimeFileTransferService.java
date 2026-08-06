@@ -84,6 +84,14 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
      */
     protected static final int MAX_PENDING_UPLOADS = 4;
 
+    /**
+     * Maximum concurrently pending download requests. Each pending record
+     * is a non-terminal transfer exempt from history eviction; the timeout
+     * sweeper reclaims stale ones, but the count is capped for symmetry
+     * with {@link #MAX_PENDING_UPLOADS}.
+     */
+    protected static final int MAX_PENDING_DOWNLOADS = 64;
+
     /** Bound on how long an API thread may block on a bucket read. */
     protected static final int BUCKET_FETCH_TIMEOUT_S = 30;
 
@@ -340,6 +348,11 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
             }
         }
 
+        if (pendingDownloadsByPath.size() >= MAX_PENDING_DOWNLOADS) {
+            throw new InvalidRequestException("Too many pending downloads ("
+                    + MAX_PENDING_DOWNLOADS + "); wait for one to complete or time out");
+        }
+
         long id = nextTransferId();
         FprimeFileTransfer transfer = new FprimeFileTransfer(
                 id, destBucket.getName(), destPath, sourcePath, -1,
@@ -452,8 +465,14 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
                 failTransfer(t, AckStatus.NOK, reason);
             }
         }
-        // Let queued notifications (including the failures above) drain,
-        // then stop the notifier thread.
+    }
+
+    /**
+     * Stop the monitor-notification thread once queued notifications drain.
+     * Called from {@code doStop()} after {@link #failNonTerminalTransfers}
+     * so shutdown-failure notifications still reach monitors.
+     */
+    protected void shutdownMonitorNotifier() {
         monitorNotifier.shutdown();
     }
 

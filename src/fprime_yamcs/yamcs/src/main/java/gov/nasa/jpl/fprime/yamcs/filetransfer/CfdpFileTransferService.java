@@ -72,7 +72,8 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *       downlinkMirrorDir: ""          # optional local mirror (default off; set a
  *                                      # service-owned directory to enable — avoid
  *                                      # world-writable locations like /tmp)
- *       maxFileSize: 268435456         # downlink allocation cap in bytes
+ *       maxFileSize: 268435456         # per-file cap: downlink allocation and
+ *                                      # uplink object size, in bytes
  *       fileDownlinkCommand: ""        # optional F´ command for startDownload
  *       sourceFileNameArg: sourceFileName  # downlink-command source-path argument name
  *       destFileNameArg: destFileName      # downlink-command destination-path argument name
@@ -306,6 +307,7 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         // stays QUEUED/RUNNING forever.
         pendingDownloadsByPath.clear();
         failNonTerminalTransfers("service stopped");
+        shutdownMonitorNotifier();
         notifyStopped();
     }
 

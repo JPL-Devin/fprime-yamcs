@@ -84,7 +84,8 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *       downlinkMirrorDir: ""          # optional local mirror (default off; set a
  *                                      # service-owned directory to enable — avoid
  *                                      # world-writable locations like /tmp)
- *       maxFileSize: 268435456         # downlink allocation cap in bytes
+ *       maxFileSize: 268435456         # per-file cap: downlink allocation and
+ *                                      # uplink object size, in bytes
  *       downloadTimeoutMs: 30000       # max wait for the F´ Start packet
  *       fileDownlinkCommand: ""        # qualified MDB name; auto-discovered
  *                                      # by "SendFile" suffix when empty
@@ -349,6 +350,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         // stays QUEUED/RUNNING forever.
         pendingDownloadsByPath.clear();
         failNonTerminalTransfers("service stopped");
+        shutdownMonitorNotifier();
         notifyStopped();
     }
 

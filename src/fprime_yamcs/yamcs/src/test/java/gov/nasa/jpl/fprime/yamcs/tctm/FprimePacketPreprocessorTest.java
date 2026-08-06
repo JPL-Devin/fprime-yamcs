@@ -120,6 +120,21 @@ public class FprimePacketPreprocessorTest {
     }
 
     @Test
+    public void remappedTlmPktApidHonoredViaConfig() {
+        preprocessor = new FprimePacketPreprocessor("test",
+                YConfiguration.wrap(Map.of("tlmPktApid", 8)));
+        long fprimeSeconds = 2_000_000L;
+        byte[] bytes = packet(8, 1, TLM_TIME_TAG_OFFSET + 8);
+        ByteBuffer bb = ByteBuffer.wrap(bytes);
+        bb.putInt(TLM_TIME_TAG_OFFSET, (int) fprimeSeconds);
+        bb.putInt(TLM_TIME_TAG_OFFSET + 4, 250_000); // microseconds
+
+        TmPacket result = process(bytes);
+        assertEquals(TimeEncoding.fromUnixMillisec(fprimeSeconds * 1000L + 250L),
+                result.getGenerationTime());
+    }
+
+    @Test
     public void eventPacketTimeTagBecomesGenerationTime() {
         long fprimeSeconds = 1_000_000L;
         byte[] bytes = packet(APID_EVENT, 1, EVENT_TIME_TAG_OFFSET + 8);

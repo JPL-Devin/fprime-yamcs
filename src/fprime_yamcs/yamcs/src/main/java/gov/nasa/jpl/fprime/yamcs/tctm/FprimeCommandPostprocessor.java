@@ -78,8 +78,8 @@ public class FprimeCommandPostprocessor implements CommandPostprocessor {
         // Set CCSDS sequence count
         int seqCount = seqFiller.fill(binary);
 
-        // Publish the sequence count to Command History. This has no special
-        // meaning to Yamcs, but shows how to store custom per-command data.
+        // Publish the sequence count to Command History so operators can
+        // correlate a command with the CCSDS frame it went out in.
         commandHistory.publish(pc.getCommandId(), "ccsds-seqcount", seqCount);
 
         // Since the binary was modified, update it in Command History too.

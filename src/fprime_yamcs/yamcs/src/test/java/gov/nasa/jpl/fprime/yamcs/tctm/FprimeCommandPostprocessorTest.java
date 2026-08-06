@@ -82,6 +82,14 @@ public class FprimeCommandPostprocessorTest {
         assertEquals(10 - 1, lengthField);
         assertTrue(publisher.publishedKeys.contains("ccsds-seqcount"));
         assertTrue(publisher.publishedKeys.contains(PreparedCommand.CNAME_BINARY));
+
+        // Successive commands on the same APID get consecutive 14-bit
+        // sequence counts patched into the header.
+        int seq1 = ByteBuffer.wrap(result).getShort(2) & 0x3FFF;
+        byte[] result2 = postprocessor.process(
+                command(new byte[SpacePacket.PRIMARY_HEADER_LEN + 10]));
+        int seq2 = ByteBuffer.wrap(result2).getShort(2) & 0x3FFF;
+        assertEquals((seq1 + 1) & 0x3FFF, seq2);
     }
 
     @Test
