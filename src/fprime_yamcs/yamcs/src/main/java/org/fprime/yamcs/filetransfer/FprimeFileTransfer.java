@@ -31,7 +31,10 @@ public class FprimeFileTransfer implements FileTransfer {
 
     private volatile long startTime;
     private volatile long transferredSize;
-    private volatile TransferState state = TransferState.RUNNING;
+    // QUEUED until the protocol handler actually starts moving bytes
+    // (uplink: dequeued by the uplink executor; downlink: first packet
+    // received from the spacecraft).
+    private volatile TransferState state = TransferState.QUEUED;
     private volatile String failureReason;
     // For downlink transfers triggered via startDownload(), this is the
     // CommandId of the synthesized spacecraft command. Verification results

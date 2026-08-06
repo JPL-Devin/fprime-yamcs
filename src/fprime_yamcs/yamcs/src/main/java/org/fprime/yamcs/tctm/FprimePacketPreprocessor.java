@@ -1,8 +1,8 @@
 package org.fprime.yamcs.tctm;
 
 import java.nio.ByteBuffer;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.yamcs.TmPacket;
@@ -27,7 +27,9 @@ import org.fprime.yamcs.packet.SpacePacket;
  */
 public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
 
-    private final Map<Integer, AtomicInteger> seqCounts = new HashMap<>();
+    // ConcurrentHashMap: links normally invoke process() from a single
+    // thread, but nothing enforces that, and the map is cheap to harden.
+    private final Map<Integer, AtomicInteger> seqCounts = new ConcurrentHashMap<>();
 
     // F´ type widths, from FpConfig / Fw::Time serialization.
     private static final int FwPacketDescriptorType_SIZE = 2;
@@ -80,13 +82,18 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
         int apidseqcount = SpacePacket.packetIdAndSequence(bytes);
         int apid = (apidseqcount >> 16) & 0x07FF;
         int seq = apidseqcount & 0x3FFF;
-        AtomicInteger ai = seqCounts.computeIfAbsent(apid, k -> new AtomicInteger());
-        int oldseq = ai.getAndSet(seq);
-
-        if (((seq - oldseq) & 0x3FFF) != 1) {
-            eventProducer.sendWarning("SEQ_COUNT_JUMP",
-                    "Sequence count jump for APID: " + apid + " old seq: " + oldseq
-                            + " newseq: " + seq);
+        AtomicInteger ai = seqCounts.get(apid);
+        if (ai == null) {
+            // First packet seen on this APID: seed the counter and skip the
+            // continuity check so link start does not raise a spurious jump.
+            seqCounts.put(apid, new AtomicInteger(seq));
+        } else {
+            int oldseq = ai.getAndSet(seq);
+            if (((seq - oldseq) & 0x3FFF) != 1) {
+                eventProducer.sendWarning("SEQ_COUNT_JUMP",
+                        "Sequence count jump for APID: " + apid + " old seq: " + oldseq
+                                + " newseq: " + seq);
+            }
         }
 
         // Find time tags depending on APID. APIDs without a known F´ time
@@ -100,8 +107,10 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
         }
         if (timeTagOffset >= 0 && bytes.length >= timeTagOffset + 8) {
             ByteBuffer bb = ByteBuffer.wrap(bytes);
-            int timeSec = bb.getInt(timeTagOffset) + LEAP_SECONDS_OFFSET;
-            int timeUsec = bb.getInt(timeTagOffset + 4); // seconds field is 4 bytes wide
+            // The F´ seconds field is an unsigned U32; mask so values past
+            // 2038-01-19 do not wrap negative.
+            long timeSec = (bb.getInt(timeTagOffset) & 0xFFFFFFFFL) + LEAP_SECONDS_OFFSET;
+            long timeUsec = bb.getInt(timeTagOffset + 4) & 0xFFFFFFFFL;
             packet.setGenerationTime((timeSec * 1000L) + (timeUsec / 1000L));
         } else {
             if (timeTagOffset >= 0) {

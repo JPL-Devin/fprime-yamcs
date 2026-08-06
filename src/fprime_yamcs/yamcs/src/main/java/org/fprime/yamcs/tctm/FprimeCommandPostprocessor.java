@@ -57,6 +57,14 @@ public class FprimeCommandPostprocessor implements CommandPostprocessor {
                     "Command binary shorter than a CCSDS space packet");
             return null; // drop the command
         }
+        if (binary.length > SpacePacket.PRIMARY_HEADER_LEN + SpacePacket.MAX_PAYLOAD_LEN) {
+            commandHistory.publishAck(pc.getCommandId(),
+                    CommandHistoryPublisher.AcknowledgeSent_KEY,
+                    System.currentTimeMillis(),
+                    CommandHistoryPublisher.AckStatus.NOK,
+                    "Command binary exceeds the CCSDS maximum packet length");
+            return null; // drop the command
+        }
 
         // Set the CCSDS packet data length field (minus one per the SPP protocol)
         ByteArrayUtils.encodeUnsignedShort(

@@ -76,8 +76,16 @@ import org.fprime.yamcs.packet.SpacePacket;
  *       uplinkLink: UDP_TC_OUT.vc1     # YAMCS TC link to route through
  *       uplinkChunkSize: 128           # bytes per Fw::FilePacket DataPacket
  *       interPacketDelayMs: 20         # pacing delay between uplink packets
- *       downlinkMirrorDir: /tmp/fprime-downlink  # local mirror (default)
+ *       downlinkMirrorDir: /tmp/fprime-downlink  # local mirror (default; "" disables)
  *       maxFileSize: 268435456         # downlink allocation cap in bytes
+ *       downloadTimeoutMs: 30000       # max wait for the F´ Start packet
+ *       fileDownlinkCommand: ""        # qualified MDB name; auto-discovered
+ *                                      # by "SendFile" suffix when empty
+ *       sourceFileNameArg: sourceFileName  # SendFile source-path argument name
+ *       destFileNameArg: destFileName      # SendFile destination-path argument name
+ *       listDirectoryCommand: ""       # qualified MDB name; auto-discovered
+ *                                      # by "ListDirectory" suffix when empty
+ *       listDirDirNameArg: dirName     # ListDirectory directory argument name
  * </pre>
  */
 public class FprimeFilePacketService extends AbstractFprimeFileTransferService
@@ -119,6 +127,9 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
     private FilePacketDownlinkHandler downlinkHandler;
     private FilePacketUplinkHandler uplinkHandler;
     private ExecutorService uplinkExecutor;
+    // Storage worker: completed downlink files are written to the bucket and
+    // mirror off the TM stream subscriber thread.
+    private ExecutorService storageExecutor;
     // Periodic sweeper that flips stuck pending-download transfers to
     // FAILED. Runs on a separate single-thread scheduler so a slow uplink
     // can't block timeout enforcement.
@@ -227,9 +238,14 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
                     interPacketDelayMs);
             this.uplinkHandler = new FilePacketUplinkHandler(
                     transport, fileApid, uplinkChunkSize, transferListener);
+            this.storageExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "FprimeFilePacketService-storage");
+                t.setDaemon(true);
+                return t;
+            });
             this.downlinkHandler = new FilePacketDownlinkHandler(
                     bucket, downlinkMirrorDir, maxFileSize,
-                    this::resolveDownlinkTransfer, transferListener);
+                    this::resolveDownlinkTransfer, transferListener, storageExecutor);
 
             // Uplink worker: single-threaded so transfers serialize and the
             // space packet stream stays ordered.
@@ -294,6 +310,9 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         }
         if (uplinkExecutor != null) {
             uplinkExecutor.shutdownNow();
+        }
+        if (storageExecutor != null) {
+            storageExecutor.shutdown();
         }
         if (inStream != null) {
             inStream.removeSubscriber(this);
@@ -368,6 +387,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
      * the "F´ never responded to our FileDownlink command" case.
      */
     private void sweepPendingDownloadTimeouts() {
+        listingHandler.expireStaleListings();
         long now = System.currentTimeMillis();
         for (Map.Entry<String, FprimeFileTransfer> entry :
                 new ArrayList<>(pendingDownloadsByPath.entrySet())) {
@@ -414,8 +434,9 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         }
         // Fetch the bytes synchronously to reject early (and populate
         // totalSize) if the object is missing. The actual transmission runs
-        // on the uplink executor.
-        byte[] content = sourceBucket.getObjectAsync(objectName).join();
+        // on the uplink executor. Bounded wait so a stalled storage backend
+        // cannot pin the API thread indefinitely.
+        byte[] content = fetchObject(sourceBucket, objectName);
         if (content == null) {
             throw new InvalidRequestException(
                     "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
@@ -476,8 +497,13 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
                 -1,                 // total size unknown until Start packet arrives
                 TransferDirection.DOWNLOAD, TRANSFER_TYPE, false);
         transfer.setStartTime(System.currentTimeMillis());
+        // Reject rather than overwrite: a displaced pending transfer could
+        // never be resolved or timed out and would sit RUNNING forever.
+        if (pendingDownloadsByPath.putIfAbsent(destPath, transfer) != null) {
+            throw new InvalidRequestException(
+                    "A download to '" + destPath + "' is already pending");
+        }
         addTransfer(transfer);
-        pendingDownloadsByPath.put(destPath, transfer);
         notifyStateChanged(transfer);
 
         try {

@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,6 +43,7 @@ public class FilePacketDownlinkHandler {
     private final TransferResolver transferResolver;
     private final TransferEventListener listener;
     private final int maxFileSize;
+    private final Executor storageExecutor;
 
     // In-flight downlink reassembly. Null means idle. Only touched from the
     // TM stream subscriber thread.
@@ -73,10 +75,14 @@ public class FilePacketDownlinkHandler {
      *                         ground-server memory
      * @param transferResolver supplies the API transfer record for a START
      * @param listener         receives transfer state changes
+     * @param storageExecutor  executor on which the completed file is written
+     *                         to the bucket/mirror, keeping blocking storage
+     *                         I/O off the TM stream subscriber thread
      */
     public FilePacketDownlinkHandler(Bucket bucket, Path mirrorDir, int maxFileSize,
                                      TransferResolver transferResolver,
-                                     TransferEventListener listener) {
+                                     TransferEventListener listener,
+                                     Executor storageExecutor) {
         if (maxFileSize <= 0) {
             throw new IllegalArgumentException("maxFileSize must be positive");
         }
@@ -85,6 +91,7 @@ public class FilePacketDownlinkHandler {
         this.maxFileSize = maxFileSize;
         this.transferResolver = transferResolver;
         this.listener = listener;
+        this.storageExecutor = storageExecutor;
     }
 
     /**
@@ -128,8 +135,20 @@ public class FilePacketDownlinkHandler {
         LOG.info("File transfer START: seq={} size={} src={} dst={}",
                 header.sequenceIndex, start.fileSize, start.sourcePath, start.destinationPath);
         if (start.fileSize < 0 || start.fileSize > maxFileSize) {
-            LOG.error("START declares file size {} outside [0, {}]; ignoring",
+            LOG.error("START declares file size {} outside [0, {}]; rejecting",
                     start.fileSize, maxFileSize);
+            // Resolve and fail immediately so a pending startDownload()
+            // transfer gets the real rejection reason instead of waiting
+            // for the no-Start timeout sweeper.
+            FprimeFileTransfer rejected = transferResolver.resolve(
+                    start.sourcePath, start.destinationPath, 0);
+            String reason = String.format(
+                    "START declares file size %d outside [0, %d]",
+                    start.fileSize, maxFileSize);
+            rejected.setFailureReason(reason);
+            rejected.setState(TransferState.FAILED);
+            listener.stateChanged(rejected);
+            listener.verifierAck(rejected, AckStatus.NOK, reason);
             return;
         }
 
@@ -158,7 +177,10 @@ public class FilePacketDownlinkHandler {
             return;
         }
         System.arraycopy(bytes, data.dataStart, inflight.buffer, data.byteOffset, data.dataSize);
-        inflight.bytesReceived += data.dataSize;
+        // Clamp: duplicate or overlapping DATA offsets must not inflate the
+        // reported progress past the declared file size.
+        inflight.bytesReceived = (int) Math.min((long) inflight.declaredSize,
+                (long) inflight.bytesReceived + data.dataSize);
 
         inflight.transfer.setTransferredSize(inflight.bytesReceived);
         listener.stateChanged(inflight.transfer);
@@ -191,27 +213,36 @@ public class FilePacketDownlinkHandler {
             failInflight("unsafe destination path: " + e.getMessage());
             return;
         }
+        // Hand storage off so blocking bucket/mirror I/O never stalls the TM
+        // stream subscriber thread. Clear the in-flight slot first: the
+        // reassembly is complete and the next START may arrive immediately.
+        Reassembly completed = inflight;
+        inflight = null;
+        storageExecutor.execute(() -> store(completed, objectName));
+    }
+
+    private void store(Reassembly completed, String objectName) {
         try {
-            // putObjectAsync returns a CompletableFuture<Void>; block on it so
-            // a single COMPLETE/FAILED line is logged per transfer instead of
-            // racing the next packet on the stream.
             bucket.putObjectAsync(objectName, "application/octet-stream",
-                    Map.of(), inflight.buffer).join();
+                    Map.of(), completed.buffer).join();
             LOG.info("File transfer COMPLETE: {} ({} bytes) -> bucket {}",
-                    objectName, inflight.bytesReceived, bucket.getName());
+                    objectName, completed.bytesReceived, bucket.getName());
 
-            mirrorToDirectory(objectName, inflight.buffer);
+            mirrorToDirectory(objectName, completed.buffer);
 
-            inflight.transfer.setTransferredSize(inflight.bytesReceived);
-            inflight.transfer.setState(TransferState.COMPLETED);
-            listener.stateChanged(inflight.transfer);
-            listener.verifierAck(inflight.transfer, AckStatus.OK,
+            completed.transfer.setTransferredSize(completed.bytesReceived);
+            completed.transfer.setState(TransferState.COMPLETED);
+            listener.stateChanged(completed.transfer);
+            listener.verifierAck(completed.transfer, AckStatus.OK,
                     String.format("delivered %d bytes to bucket %s/%s",
-                            inflight.bytesReceived, bucket.getName(), objectName));
-            inflight = null;
+                            completed.bytesReceived, bucket.getName(), objectName));
         } catch (Exception e) {
             LOG.error("Failed to store file in bucket", e);
-            failInflight("bucket write failed: " + e.getMessage());
+            String reason = "bucket write failed: " + e.getMessage();
+            completed.transfer.setFailureReason(reason);
+            completed.transfer.setState(TransferState.FAILED);
+            listener.stateChanged(completed.transfer);
+            listener.verifierAck(completed.transfer, AckStatus.NOK, reason);
         }
     }
 

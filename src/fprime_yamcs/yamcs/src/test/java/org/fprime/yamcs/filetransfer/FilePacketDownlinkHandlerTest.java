@@ -16,6 +16,7 @@ import java.util.Random;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.yamcs.cmdhistory.CommandHistoryPublisher.AckStatus;
 import org.yamcs.protobuf.TransferDirection;
 import org.yamcs.protobuf.TransferState;
 
@@ -44,7 +45,7 @@ public class FilePacketDownlinkHandlerTest {
                     lastResolved = new FprimeFileTransfer(1, "fake", dst, src, size,
                             TransferDirection.DOWNLOAD, "test", false);
                     return lastResolved;
-                }, listener);
+                }, listener, Runnable::run);
     }
 
     private static void sendSequence(FilePacketDownlinkHandler h, String dst, byte[] content) {
@@ -85,17 +86,20 @@ public class FilePacketDownlinkHandlerTest {
     }
 
     @Test
-    public void oversizeStartIgnored() {
+    public void oversizeStartFailsTransfer() {
         FilePacketDownlinkHandler h = handler(100);
         h.handleFilePacket(FilePacket.encodeStart(0, 101, "/src", "/f"), 0);
-        assertNull(lastResolved);
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("outside"));
+        assertTrue(bucket.objects.isEmpty());
     }
 
     @Test
-    public void negativeDeclaredSizeIgnored() {
+    public void negativeDeclaredSizeFailsTransfer() {
         FilePacketDownlinkHandler h = handler(100);
         h.handleFilePacket(FilePacket.encodeStart(0, -1, "/src", "/f"), 0);
-        assertNull(lastResolved);
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(bucket.objects.isEmpty());
     }
 
     @Test
@@ -157,6 +161,42 @@ public class FilePacketDownlinkHandlerTest {
         h.handleFilePacket(cancel, 0);
         assertEquals(TransferState.FAILED, lastResolved.getTransferState());
         assertTrue(lastResolved.getFailuredReason().contains("cancelled"));
+    }
+
+    @Test
+    public void newStartSupersedesInflightTransfer() {
+        FilePacketDownlinkHandler h = handler(1024);
+        h.handleFilePacket(FilePacket.encodeStart(0, 10, "/src1", "/f1"), 0);
+        FprimeFileTransfer first = lastResolved;
+
+        byte[] content = new byte[10];
+        new Random(7).nextBytes(content);
+        sendSequence(h, "/f2", content);
+
+        assertEquals(TransferState.FAILED, first.getTransferState());
+        assertTrue(first.getFailuredReason().contains("superseded"));
+        assertEquals(TransferState.COMPLETED, lastResolved.getTransferState());
+        assertArrayEquals(content, bucket.objects.get("f2"));
+    }
+
+    @Test
+    public void dataAndEndWithNoInflightAreIgnored() {
+        FilePacketDownlinkHandler h = handler(1024);
+        byte[] data = new byte[4];
+        h.handleFilePacket(FilePacket.encodeData(1, 0, data, 0, data.length), 0);
+        h.handleFilePacket(FilePacket.encodeEnd(2, 0), 0);
+        assertNull(lastResolved);
+        assertTrue(bucket.objects.isEmpty());
+        assertTrue(listener.stateChanges.isEmpty());
+    }
+
+    @Test
+    public void completionPublishesVerifierAcks() {
+        FilePacketDownlinkHandler h = handler(1024);
+        byte[] content = new byte[10];
+        sendSequence(h, "/f", content);
+        assertTrue(listener.acks.contains(AckStatus.PENDING));
+        assertTrue(listener.acks.contains(AckStatus.OK));
     }
 
     @Test

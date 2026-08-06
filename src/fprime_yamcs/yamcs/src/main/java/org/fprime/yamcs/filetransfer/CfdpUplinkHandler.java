@@ -58,6 +58,8 @@ public class CfdpUplinkHandler {
     public void run(FprimeFileTransfer transfer, byte[] content) {
         try {
             transfer.setStartTime(System.currentTimeMillis());
+            transfer.setState(TransferState.RUNNING);
+            listener.stateChanged(transfer);
             int txSeq = nextTransactionSeq();
             LOG.info("CFDP uplink START: id={} tx={} object={} -> {} ({} bytes)",
                     transfer.getId(), txSeq, transfer.getObjectName(),

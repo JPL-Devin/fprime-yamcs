@@ -55,6 +55,20 @@ public class RemoteFileListingHandler implements StreamSubscriber {
     // The error format is not strictly matched since any error is a terminal
     // failure; only the event type and directory name are needed.
 
+    /**
+     * Maximum entries retained per in-progress listing. Entries beyond this
+     * are dropped (with a warning) so a misbehaving or spoofed event stream
+     * cannot grow ground-server memory without bound.
+     */
+    static final int MAX_LISTING_ENTRIES = 100_000;
+
+    /**
+     * Age after which an in-progress listing whose terminal event never
+     * arrived (dropped packet, F´ reset, ...) is expired and flipped to
+     * failed, bounding how long an accumulator can live.
+     */
+    static final long LISTING_EXPIRY_MS = 5 * 60 * 1000L;
+
     private final String remoteEntityName;
     private final Map<String, ListingAccumulator> inProgressListings = new ConcurrentHashMap<>();
     private final Map<String, ListFilesResponse> fileListCache = new ConcurrentHashMap<>();
@@ -74,7 +88,26 @@ public class RemoteFileListingHandler implements StreamSubscriber {
      * for a fresh view.
      */
     public void beginListing(String dirName) {
+        expireStaleListings();
         inProgressListings.put(dirName, new ListingAccumulator(dirName));
+    }
+
+    /**
+     * Expire in-progress listings older than {@link #LISTING_EXPIRY_MS},
+     * flipping them to failed. Called opportunistically from
+     * {@link #beginListing} and periodically by the owning service's
+     * timeout sweeper.
+     */
+    public void expireStaleListings() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, ListingAccumulator> entry :
+                new ArrayList<>(inProgressListings.entrySet())) {
+            if (now - entry.getValue().createdAt > LISTING_EXPIRY_MS) {
+                LOG.warn("Expiring stale listing of {} (no terminal event after {} ms)",
+                        entry.getKey(), LISTING_EXPIRY_MS);
+                completeListing(entry.getKey(), "failed");
+            }
+        }
     }
 
     /** Terminate an in-progress listing as failed (e.g. command dispatch error). */
@@ -287,12 +320,16 @@ public class RemoteFileListingHandler implements StreamSubscriber {
     private final class ListingAccumulator {
         private final String dirName;
         private final List<RemoteFile> entries = new ArrayList<>();
+        final long createdAt = System.currentTimeMillis();
 
         ListingAccumulator(String dirName) {
             this.dirName = dirName;
         }
 
         synchronized void addFile(String name, long size) {
+            if (!hasCapacity()) {
+                return;
+            }
             entries.add(RemoteFile.newBuilder()
                     .setName(name)
                     .setIsDirectory(false)
@@ -301,11 +338,23 @@ public class RemoteFileListingHandler implements StreamSubscriber {
         }
 
         synchronized void addSubdir(String name) {
+            if (!hasCapacity()) {
+                return;
+            }
             entries.add(RemoteFile.newBuilder()
                     .setName(name)
                     .setIsDirectory(true)
                     .setSize(0)
                     .build());
+        }
+
+        private boolean hasCapacity() {
+            if (entries.size() >= MAX_LISTING_ENTRIES) {
+                LOG.warn("Listing of {} exceeds {} entries; dropping further entries",
+                        dirName, MAX_LISTING_ENTRIES);
+                return false;
+            }
+            return true;
         }
 
         synchronized ListFilesResponse build(String state) {

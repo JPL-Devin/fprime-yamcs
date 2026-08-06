@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +38,7 @@ public class CfdpDownlinkHandler {
     private final int maxFileSize;
     private final TransferResolver transferResolver;
     private final TransferEventListener listener;
+    private final Executor storageExecutor;
 
     // In-flight transaction reassembly. Null means idle. Only touched from
     // the TM stream subscriber thread.
@@ -66,10 +68,14 @@ public class CfdpDownlinkHandler {
      *                         in bytes; bounds the reassembly buffer
      * @param transferResolver supplies the API transfer record for a Metadata
      * @param listener         receives transfer state changes
+     * @param storageExecutor  executor on which the completed file is written
+     *                         to the bucket/mirror, keeping blocking storage
+     *                         I/O off the TM stream subscriber thread
      */
     public CfdpDownlinkHandler(Bucket bucket, Path mirrorDir, int maxFileSize,
                                TransferResolver transferResolver,
-                               TransferEventListener listener) {
+                               TransferEventListener listener,
+                               Executor storageExecutor) {
         if (maxFileSize <= 0) {
             throw new IllegalArgumentException("maxFileSize must be positive");
         }
@@ -78,6 +84,7 @@ public class CfdpDownlinkHandler {
         this.maxFileSize = maxFileSize;
         this.transferResolver = transferResolver;
         this.listener = listener;
+        this.storageExecutor = storageExecutor;
     }
 
     /** Process one CFDP PDU found at {@code offset} within {@code bytes}. */
@@ -116,8 +123,20 @@ public class CfdpDownlinkHandler {
         LOG.info("CFDP downlink Metadata: tx={} size={} src={} dst={}",
                 header.transactionSeq, md.fileSize, md.sourceFileName, md.destinationFileName);
         if (md.fileSize < 0 || md.fileSize > maxFileSize) {
-            LOG.error("Metadata declares file size {} outside [0, {}]; ignoring",
+            LOG.error("Metadata declares file size {} outside [0, {}]; rejecting",
                     md.fileSize, maxFileSize);
+            // Resolve and fail immediately so a pending startDownload()
+            // transfer gets the real rejection reason instead of waiting
+            // for the timeout sweeper.
+            FprimeFileTransfer rejected = transferResolver.resolve(
+                    md.sourceFileName, md.destinationFileName, 0);
+            String reason = String.format(
+                    "Metadata declares file size %d outside [0, %d]",
+                    md.fileSize, maxFileSize);
+            rejected.setFailureReason(reason);
+            rejected.setState(TransferState.FAILED);
+            listener.stateChanged(rejected);
+            listener.verifierAck(rejected, AckStatus.NOK, reason);
             return;
         }
 
@@ -151,7 +170,10 @@ public class CfdpDownlinkHandler {
             return;
         }
         System.arraycopy(bytes, data.dataStart, inflight.buffer, data.offset, data.dataSize);
-        inflight.bytesReceived += data.dataSize;
+        // Clamp: duplicate or overlapping File Data offsets must not inflate
+        // the reported progress past the declared file size.
+        inflight.bytesReceived = (int) Math.min((long) inflight.declaredSize,
+                (long) inflight.bytesReceived + data.dataSize);
 
         inflight.transfer.setTransferredSize(inflight.bytesReceived);
         listener.stateChanged(inflight.transfer);
@@ -195,24 +217,36 @@ public class CfdpDownlinkHandler {
             failInflight("unsafe destination path: " + e.getMessage());
             return;
         }
+        // Hand storage off so blocking bucket/mirror I/O never stalls the TM
+        // stream subscriber thread. Clear the in-flight slot first: the
+        // reassembly is complete and the next Metadata may arrive immediately.
+        Reassembly completed = inflight;
+        inflight = null;
+        storageExecutor.execute(() -> store(completed, objectName));
+    }
+
+    private void store(Reassembly completed, String objectName) {
         try {
             bucket.putObjectAsync(objectName, "application/octet-stream",
-                    Map.of(), inflight.buffer).join();
+                    Map.of(), completed.buffer).join();
             LOG.info("CFDP downlink COMPLETE: {} ({} bytes) -> bucket {}",
-                    objectName, inflight.bytesReceived, bucket.getName());
+                    objectName, completed.bytesReceived, bucket.getName());
 
-            mirrorToDirectory(objectName, inflight.buffer);
+            mirrorToDirectory(objectName, completed.buffer);
 
-            inflight.transfer.setTransferredSize(inflight.bytesReceived);
-            inflight.transfer.setState(TransferState.COMPLETED);
-            listener.stateChanged(inflight.transfer);
-            listener.verifierAck(inflight.transfer, AckStatus.OK,
+            completed.transfer.setTransferredSize(completed.bytesReceived);
+            completed.transfer.setState(TransferState.COMPLETED);
+            listener.stateChanged(completed.transfer);
+            listener.verifierAck(completed.transfer, AckStatus.OK,
                     String.format("delivered %d bytes to bucket %s/%s",
-                            inflight.bytesReceived, bucket.getName(), objectName));
-            inflight = null;
+                            completed.bytesReceived, bucket.getName(), objectName));
         } catch (Exception e) {
             LOG.error("Failed to store file in bucket", e);
-            failInflight("bucket write failed: " + e.getMessage());
+            String reason = "bucket write failed: " + e.getMessage();
+            completed.transfer.setFailureReason(reason);
+            completed.transfer.setState(TransferState.FAILED);
+            listener.stateChanged(completed.transfer);
+            listener.verifierAck(completed.transfer, AckStatus.NOK, reason);
         }
     }
 

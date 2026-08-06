@@ -54,6 +54,8 @@ public class FilePacketUplinkHandler {
     public void run(FprimeFileTransfer transfer, byte[] content) {
         try {
             transfer.setStartTime(System.currentTimeMillis());
+            transfer.setState(TransferState.RUNNING);
+            listener.stateChanged(transfer);
             LOG.info("Uplink START: id={} bucket={} object={} -> {} ({} bytes)",
                     transfer.getId(), transfer.getBucketName(), transfer.getObjectName(),
                     transfer.getRemotePath(), content.length);

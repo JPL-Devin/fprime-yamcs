@@ -106,6 +106,9 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
     private CfdpDownlinkHandler downlinkHandler;
     private CfdpUplinkHandler uplinkHandler;
     private ExecutorService uplinkExecutor;
+    // Storage worker: completed downlink files are written to the bucket and
+    // mirror off the TM stream subscriber thread.
+    private ExecutorService storageExecutor;
     private ScheduledExecutorService timeoutScheduler;
     private MetaCommand fileDownlinkCommand;   // may be null if not in MDB
 
@@ -201,9 +204,14 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
             this.uplinkHandler = new CfdpUplinkHandler(
                     transport, cfdpApid, uplinkChunkSize,
                     localEntityId, remoteEntityId, transferListener);
+            this.storageExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "CfdpFileTransferService-storage");
+                t.setDaemon(true);
+                return t;
+            });
             this.downlinkHandler = new CfdpDownlinkHandler(
                     bucket, downlinkMirrorDir, maxFileSize,
-                    this::resolveDownlinkTransfer, transferListener);
+                    this::resolveDownlinkTransfer, transferListener, storageExecutor);
 
             // Uplink worker: single-threaded so transactions serialize and
             // the PDU stream stays ordered.
@@ -245,6 +253,9 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         }
         if (uplinkExecutor != null) {
             uplinkExecutor.shutdownNow();
+        }
+        if (storageExecutor != null) {
+            storageExecutor.shutdown();
         }
         if (inStream != null) {
             inStream.removeSubscriber(this);
@@ -343,7 +354,9 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         if (objectName == null || objectName.isEmpty()) {
             throw new InvalidRequestException("objectName is required");
         }
-        byte[] content = sourceBucket.getObjectAsync(objectName).join();
+        // Bounded wait so a stalled storage backend cannot pin the API
+        // thread indefinitely.
+        byte[] content = fetchObject(sourceBucket, objectName);
         if (content == null) {
             throw new InvalidRequestException(
                     "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
@@ -386,8 +399,13 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
                 id, destBucket.getName(), destPath, sourcePath, -1,
                 TransferDirection.DOWNLOAD, TRANSFER_TYPE, false);
         transfer.setStartTime(System.currentTimeMillis());
+        // Reject rather than overwrite: a displaced pending transfer could
+        // never be resolved or timed out and would sit RUNNING forever.
+        if (pendingDownloadsByPath.putIfAbsent(destPath, transfer) != null) {
+            throw new InvalidRequestException(
+                    "A download to '" + destPath + "' is already pending");
+        }
         addTransfer(transfer);
-        pendingDownloadsByPath.put(destPath, transfer);
         notifyStateChanged(transfer);
 
         try {

@@ -30,7 +30,7 @@ public class CfdpDownlinkHandlerTest {
                     lastResolved = new FprimeFileTransfer(1, "fake", dst, src, size,
                             TransferDirection.DOWNLOAD, "CFDP", false);
                     return lastResolved;
-                }, listener);
+                }, listener, Runnable::run);
     }
 
     private void feed(CfdpDownlinkHandler h, byte[] pdu) {
@@ -76,10 +76,12 @@ public class CfdpDownlinkHandlerTest {
     }
 
     @Test
-    public void oversizeMetadataIgnored() {
+    public void oversizeMetadataFailsTransfer() {
         CfdpDownlinkHandler h = handler(100);
         feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 101, "s", "/d.bin"));
-        assertEquals(null, lastResolved);
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("outside"));
+        assertTrue(bucket.objects.isEmpty());
     }
 
     @Test

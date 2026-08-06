@@ -1,12 +1,17 @@
 package org.fprime.yamcs.filetransfer;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
@@ -235,7 +240,7 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
      */
     protected boolean resolveProcessor() {
         YamcsServerInstance ysi = YamcsServer.getServer().getInstance(yamcsInstance);
-        this.processor = ysi.getFirstProcessor();
+        this.processor = ysi == null ? null : ysi.getFirstProcessor();
         if (processor == null) {
             log.warn("No processor available; spacecraft command synthesis disabled");
             return false;
@@ -256,16 +261,46 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
             return null;
         }
         String name = configuredName;
-        if (name == null || name.isEmpty()) {
+        if ((name == null || name.isEmpty()) && suffix != null && !suffix.isEmpty()) {
+            // Match on a name-segment boundary so e.g. "AbortSendFile" is
+            // never mistaken for "SendFile", and warn if the suffix is
+            // ambiguous across the MDB.
+            List<String> candidates = new ArrayList<>();
             for (MetaCommand cmd : processor.getMdb().getMetaCommands()) {
-                if (cmd.getQualifiedName().endsWith(suffix)) {
-                    name = cmd.getQualifiedName();
-                    break;
+                String qn = cmd.getQualifiedName();
+                if (qn.endsWith("/" + suffix) || qn.endsWith("." + suffix)) {
+                    candidates.add(qn);
                 }
             }
+            if (candidates.size() > 1) {
+                log.warn("Multiple commands match suffix '{}': {}; using the first",
+                        suffix, candidates);
+            }
+            name = candidates.isEmpty() ? null : candidates.get(0);
             log.info("Auto-discovered command for suffix '{}': {}", suffix, name);
         }
-        return name == null ? null : processor.getMdb().getMetaCommand(name);
+        return name == null || name.isEmpty() ? null : processor.getMdb().getMetaCommand(name);
+    }
+
+    /**
+     * Fetch a bucket object with a bounded wait, translating async failures
+     * into the API-facing exception types.
+     */
+    protected static byte[] fetchObject(Bucket bucket, String objectName) throws IOException {
+        try {
+            return bucket.getObjectAsync(objectName).get(30, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while reading '" + objectName
+                    + "' from bucket " + bucket.getName(), e);
+        } catch (TimeoutException e) {
+            throw new IOException("Timed out reading '" + objectName
+                    + "' from bucket " + bucket.getName(), e);
+        } catch (ExecutionException | CompletionException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            throw new IOException("Failed to read '" + objectName + "' from bucket "
+                    + bucket.getName() + ": " + cause.getMessage(), cause);
+        }
     }
 
     /** Build and dispatch a spacecraft command, returning its CommandId. */
