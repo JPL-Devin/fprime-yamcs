@@ -70,6 +70,11 @@ The file transfer service routes uplink through the YAMCS data link named by the
 
 Reusable protocol pieces (`gov.nasa.jpl.fprime.yamcs.packet` codecs, `UplinkTransport`, `AbstractFprimeFileTransferService`) are shared infrastructure backing both services and any future transfer protocols.
 
+Deployment notes:
+
+- Both services synthesize their transfer/listing spacecraft commands as the YAMCS system user (matching the built-in `CfdpService`), so any user granted file-transfer privileges implicitly bypasses per-command authorization for the configured commands — scope file-transfer privileges accordingly.
+- `maxFileSize` bounds the memory a single downlink reassembly may allocate (default 256 MiB); reduce it on constrained ground servers, since unsolicited downlinks on the configured APID allocate up to this bound.
+
 Run the Java unit tests (requires JDK 17) with:
 
 ```
