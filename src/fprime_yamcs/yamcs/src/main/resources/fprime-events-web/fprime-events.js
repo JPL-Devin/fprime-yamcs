@@ -175,6 +175,7 @@ class FprimeEventsElement extends HTMLElement {
     this._subscription = null;
     this._service = null;
     this._pinnedToBottom = true;
+    this._shownCount = 0;
   }
 
   set extensionService(service) {
@@ -183,7 +184,17 @@ class FprimeEventsElement extends HTMLElement {
     this.connect();
   }
 
+  connectedCallback() {
+    if (this._service && !this._subscription) {
+      this.connect();
+    }
+  }
+
   disconnectedCallback() {
+    this.disconnect();
+  }
+
+  disconnect() {
     if (this._subscription) {
       this._subscription.cancel();
       this._subscription = null;
@@ -215,7 +226,6 @@ class FprimeEventsElement extends HTMLElement {
 
     const severities = document.createElement("div");
     severities.className = "fp-severities";
-    this._severityChecks = {};
     for (const severity of SEVERITIES) {
       const label = document.createElement("label");
       label.style.background = SEVERITY_COLORS[severity];
@@ -230,7 +240,6 @@ class FprimeEventsElement extends HTMLElement {
         }
         this.redraw();
       });
-      this._severityChecks[severity] = check;
       label.appendChild(check);
       label.appendChild(document.createTextNode(severity));
       severities.appendChild(label);
@@ -280,6 +289,7 @@ class FprimeEventsElement extends HTMLElement {
   }
 
   async connect() {
+    this.disconnect();
     const yamcs = this._service.yamcs;
     const instance = yamcs.instance;
     const client = yamcs.yamcsClient;
@@ -302,7 +312,8 @@ class FprimeEventsElement extends HTMLElement {
   }
 
   addEvents(events) {
-    let added = false;
+    const appended = [];
+    let inOrder = true;
     for (const event of events) {
       if (!isFprimeEvent(event)) {
         continue;
@@ -311,25 +322,49 @@ class FprimeEventsElement extends HTMLElement {
       if (this._keys.has(normalized.key)) {
         continue;
       }
+      const last = this._events[this._events.length - 1];
+      if (last && normalized.time.localeCompare(last.time) < 0) {
+        inOrder = false;
+      }
       this._keys.add(normalized.key);
       this._events.push(normalized);
-      added = true;
+      appended.push(normalized);
     }
-    if (!added) {
+    if (!appended.length) {
       return;
     }
-    this._events.sort((a, b) => a.time.localeCompare(b.time));
+    if (!inOrder) {
+      this._events.sort((a, b) => a.time.localeCompare(b.time));
+    }
+    let trimmed = false;
     if (this._events.length > MAX_EVENTS) {
       const removed = this._events.splice(0, this._events.length - MAX_EVENTS);
       for (const item of removed) {
         this._keys.delete(item.key);
       }
+      trimmed = true;
     }
-    this.redraw();
+    // Append-only fast path: avoids rebuilding up to MAX_EVENTS DOM rows
+    // per received event during event storms
+    if (inOrder && !trimmed && this._tbody) {
+      let shown = 0;
+      for (const item of appended) {
+        if (this.matches(item)) {
+          this._tbody.appendChild(this.buildRow(item));
+          shown++;
+        }
+      }
+      this._shownCount += shown;
+      this.updateCount();
+      this.scrollIfPinned();
+    } else {
+      this.redraw();
+    }
   }
 
   matches(item) {
-    if (!this._enabledSeverities.has(item.severity)) {
+    // Unknown severities are never filtered out (they have no toggle)
+    if (SEVERITIES.includes(item.severity) && !this._enabledSeverities.has(item.severity)) {
       return false;
     }
     if (!this._filterText) {
@@ -347,31 +382,43 @@ class FprimeEventsElement extends HTMLElement {
     return haystack.includes(this._filterText);
   }
 
+  buildRow(item) {
+    const row = document.createElement("tr");
+    row.style.background = SEVERITY_COLORS[item.severity] || "transparent";
+    for (const value of [item.time, item.id, item.name, item.severity, item.message]) {
+      const td = document.createElement("td");
+      td.textContent = value;
+      row.appendChild(td);
+    }
+    row.lastChild.className = "fp-message";
+    return row;
+  }
+
+  updateCount() {
+    this._countLabel.textContent = `${this._shownCount} of ${this._events.length} events`;
+  }
+
+  scrollIfPinned() {
+    if (this._pinnedToBottom) {
+      this._tableHolder.scrollTop = this._tableHolder.scrollHeight;
+    }
+  }
+
   redraw() {
     if (!this._tbody) {
       return;
     }
     this._tbody.innerHTML = "";
-    let shown = 0;
+    this._shownCount = 0;
     for (const item of this._events) {
       if (!this.matches(item)) {
         continue;
       }
-      shown++;
-      const row = document.createElement("tr");
-      row.style.background = SEVERITY_COLORS[item.severity] || "transparent";
-      for (const value of [item.time, item.id, item.name, item.severity, item.message]) {
-        const td = document.createElement("td");
-        td.textContent = value;
-        row.appendChild(td);
-      }
-      row.lastChild.className = "fp-message";
-      this._tbody.appendChild(row);
+      this._shownCount++;
+      this._tbody.appendChild(this.buildRow(item));
     }
-    this._countLabel.textContent = `${shown} of ${this._events.length} events`;
-    if (this._pinnedToBottom) {
-      this._tableHolder.scrollTop = this._tableHolder.scrollHeight;
-    }
+    this.updateCount();
+    this.scrollIfPinned();
   }
 }
 
@@ -385,5 +432,10 @@ class FprimeYamcsInitializer extends HTMLElement {
   }
 }
 
-customElements.define("fprime-events", FprimeEventsElement);
-customElements.define("fprime-yamcs", FprimeYamcsInitializer);
+// Guarded: a stale bundle double-load must not throw on re-registration
+if (!customElements.get("fprime-events")) {
+  customElements.define("fprime-events", FprimeEventsElement);
+}
+if (!customElements.get("fprime-yamcs")) {
+  customElements.define("fprime-yamcs", FprimeYamcsInitializer);
+}
