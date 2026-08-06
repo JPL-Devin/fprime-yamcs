@@ -322,6 +322,13 @@ public class FilePacketDownlinkHandler {
 
     private void handleCancel(FilePacket.Header header) {
         if (inflight != null) {
+            // Same staleness gate as DATA/END: a replayed CANCEL from an
+            // earlier transfer must not abort the current one.
+            if (header.sequenceIndex <= inflight.lastSequenceIndex) {
+                LOG.warn("Ignoring stale CANCEL seq={} (last seen {})",
+                        header.sequenceIndex, inflight.lastSequenceIndex);
+                return;
+            }
             LOG.warn("File transfer CANCELLED at seq {} (was: {})",
                     header.sequenceIndex, inflight.destinationPath);
             failInflight("cancelled by spacecraft");

@@ -133,7 +133,7 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     protected CommandHistoryPublisher commandHistoryPublisher;
     protected User systemUser;
 
-    protected RemoteFileListingHandler listingHandler =
+    protected final RemoteFileListingHandler listingHandler =
             new RemoteFileListingHandler(REMOTE_ENTITY_NAME);
 
     // ------------------------------------------------------------------
@@ -348,11 +348,6 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
             }
         }
 
-        if (pendingDownloadsByPath.size() >= MAX_PENDING_DOWNLOADS) {
-            throw new InvalidRequestException("Too many pending downloads ("
-                    + MAX_PENDING_DOWNLOADS + "); wait for one to complete or time out");
-        }
-
         long id = nextTransferId();
         FprimeFileTransfer transfer = new FprimeFileTransfer(
                 id, destBucket.getName(), destPath, sourcePath, -1,
@@ -364,6 +359,13 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
         if (pendingDownloadsByPath.putIfAbsent(destPath, transfer) != null) {
             throw new InvalidRequestException(
                     "A download to '" + destPath + "' is already pending");
+        }
+        // Reserve-then-rollback: check the bound only after inserting so
+        // concurrent callers cannot slip past MAX_PENDING_DOWNLOADS.
+        if (pendingDownloadsByPath.size() > MAX_PENDING_DOWNLOADS) {
+            pendingDownloadsByPath.remove(destPath, transfer);
+            throw new InvalidRequestException("Too many pending downloads ("
+                    + MAX_PENDING_DOWNLOADS + "); wait for one to complete or time out");
         }
         addTransfer(transfer);
         notifyStateChanged(transfer);
@@ -429,13 +431,32 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
      */
     protected void submitUplink(ExecutorService uplinkExecutor,
                                 FprimeFileTransfer transfer, Runnable task) {
-        // Atomic reservation: increment first, roll back if over the bound,
-        // so concurrent submissions cannot slip past MAX_PENDING_UPLOADS.
+        reserveUplinkSlot();
+        submitReservedUplink(uplinkExecutor, transfer, task);
+    }
+
+    /**
+     * Atomically reserve an uplink backlog slot: increment first, roll back
+     * if over the bound, so concurrent submissions cannot slip past
+     * {@link #MAX_PENDING_UPLOADS}. Reserve before fetching file contents
+     * so rejected requests never pin the bytes in memory.
+     */
+    protected void reserveUplinkSlot() {
         if (pendingUplinks.incrementAndGet() > MAX_PENDING_UPLOADS) {
             pendingUplinks.decrementAndGet();
             throw new InvalidRequestException("uplink backlog: " + MAX_PENDING_UPLOADS
                     + " transfers already queued");
         }
+    }
+
+    /** Release a slot taken by {@link #reserveUplinkSlot()} without submitting. */
+    protected void releaseUplinkSlot() {
+        pendingUplinks.decrementAndGet();
+    }
+
+    /** Submit an uplink whose backlog slot is already reserved. */
+    protected void submitReservedUplink(ExecutorService uplinkExecutor,
+                                        FprimeFileTransfer transfer, Runnable task) {
         addTransfer(transfer);
         notifyStateChanged(transfer);
         try {

@@ -11,8 +11,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.yamcs.InitException;
 import org.yamcs.Spec;
 import org.yamcs.Spec.OptionType;
@@ -100,9 +98,6 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  */
 public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         implements StreamSubscriber {
-
-    private static final Logger LOG =
-            LoggerFactory.getLogger(FprimeFilePacketService.class);
 
     // 256 MiB: generously above any realistic Fw::FilePacket downlink while
     // bounding what a corrupt/malicious START packet can allocate.
@@ -385,8 +380,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
             return null;  // Not a file packet.
         }
         if (!FilePacket.isFilePacket(bytes, SpacePacket.PRIMARY_HEADER_LEN)) {
-            LOG.warn("Got APID {} but unexpected packet descriptor", apid);
-            return null;
+            return null;  // Right APID but not an Fw::FilePacket descriptor.
         }
         int declared = SpacePacket.declaredLength(bytes);
         if (bytes.length > declared) {
@@ -432,26 +426,35 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         if (objectName == null || objectName.isEmpty()) {
             throw new InvalidRequestException("objectName is required");
         }
-        // Fetch the bytes synchronously to reject early (and populate
-        // totalSize) if the object is missing. The actual transmission runs
-        // on the uplink executor. Bounded wait so a stalled storage backend
-        // cannot pin the API thread indefinitely.
-        byte[] content = fetchObject(sourceBucket, objectName);
-        if (content == null) {
-            throw new InvalidRequestException(
-                    "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
-        }
-        if (content.length > maxFileSize) {
-            throw new InvalidRequestException("Object '" + objectName + "' is "
-                    + content.length + " bytes, larger than maxFileSize " + maxFileSize);
-        }
+        // Reserve the backlog slot before fetching so rejected requests
+        // never pin the file bytes in memory. Bounded wait so a stalled
+        // storage backend cannot pin the API thread indefinitely.
+        reserveUplinkSlot();
+        boolean submitted = false;
+        try {
+            byte[] content = fetchObject(sourceBucket, objectName);
+            if (content == null) {
+                throw new InvalidRequestException(
+                        "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
+            }
+            if (content.length > maxFileSize) {
+                throw new InvalidRequestException("Object '" + objectName + "' is "
+                        + content.length + " bytes, larger than maxFileSize " + maxFileSize);
+            }
 
-        String dest = (remotePath == null || remotePath.isEmpty()) ? objectName : remotePath;
-        FprimeFileTransfer transfer = new FprimeFileTransfer(
-                nextTransferId(), sourceBucket.getName(), objectName, dest,
-                content.length, TransferDirection.UPLOAD, TRANSFER_TYPE, false);
-        submitUplink(uplinkExecutor, transfer, () -> uplinkHandler.run(transfer, content));
-        return transfer;
+            String dest = (remotePath == null || remotePath.isEmpty()) ? objectName : remotePath;
+            FprimeFileTransfer transfer = new FprimeFileTransfer(
+                    nextTransferId(), sourceBucket.getName(), objectName, dest,
+                    content.length, TransferDirection.UPLOAD, TRANSFER_TYPE, false);
+            submitReservedUplink(uplinkExecutor, transfer,
+                    () -> uplinkHandler.run(transfer, content));
+            submitted = true;
+            return transfer;
+        } finally {
+            if (!submitted) {
+                releaseUplinkSlot();
+            }
+        }
     }
 
     @Override

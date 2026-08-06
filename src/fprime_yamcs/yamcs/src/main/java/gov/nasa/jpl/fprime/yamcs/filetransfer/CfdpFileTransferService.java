@@ -63,7 +63,9 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *     args:
  *       inStream: tm_realtime          # default
  *       bucket: cfdpFiles              # incoming bucket
- *       cfdpApid: 5                    # APID carrying CFDP PDUs
+ *       cfdpApid: 5                    # APID carrying CFDP PDUs; pick one
+ *                                      # unused by ComCfg (0x0005 is
+ *                                      # FW_PACKET_DP in the F´ default)
  *       localEntityId: 1               # ground CFDP entity id
  *       remoteEntityId: 2              # spacecraft CFDP entity id
  *       uplinkLink: UDP_TC_OUT.vc1     # YAMCS TC link to route through
@@ -384,25 +386,36 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         if (objectName == null || objectName.isEmpty()) {
             throw new InvalidRequestException("objectName is required");
         }
-        // Bounded wait so a stalled storage backend cannot pin the API
-        // thread indefinitely.
-        byte[] content = fetchObject(sourceBucket, objectName);
-        if (content == null) {
-            throw new InvalidRequestException(
-                    "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
-        }
-        if (content.length > maxFileSize) {
-            throw new InvalidRequestException("Object '" + objectName + "' is "
-                    + content.length + " bytes, larger than maxFileSize " + maxFileSize);
-        }
+        // Reserve the backlog slot before fetching so rejected requests
+        // never pin the file bytes in memory. Bounded wait so a stalled
+        // storage backend cannot pin the API thread indefinitely.
+        reserveUplinkSlot();
+        boolean submitted = false;
+        try {
+            byte[] content = fetchObject(sourceBucket, objectName);
+            if (content == null) {
+                throw new InvalidRequestException(
+                        "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
+            }
+            if (content.length > maxFileSize) {
+                throw new InvalidRequestException("Object '" + objectName + "' is "
+                        + content.length + " bytes, larger than maxFileSize " + maxFileSize);
+            }
 
-        String dest = (remotePath == null || remotePath.isEmpty()) ? objectName : remotePath;
-        FprimeFileTransfer transfer = new FprimeFileTransfer(
-                nextTransferId(), sourceBucket.getName(), objectName, dest,
-                content.length, TransferDirection.UPLOAD, TRANSFER_TYPE, false);
-        transfer.setEntityIds(localEntityId, remoteEntityId);
-        submitUplink(uplinkExecutor, transfer, () -> uplinkHandler.run(transfer, content));
-        return transfer;
+            String dest = (remotePath == null || remotePath.isEmpty()) ? objectName : remotePath;
+            FprimeFileTransfer transfer = new FprimeFileTransfer(
+                    nextTransferId(), sourceBucket.getName(), objectName, dest,
+                    content.length, TransferDirection.UPLOAD, TRANSFER_TYPE, false);
+            transfer.setEntityIds(localEntityId, remoteEntityId);
+            submitReservedUplink(uplinkExecutor, transfer,
+                    () -> uplinkHandler.run(transfer, content));
+            submitted = true;
+            return transfer;
+        } finally {
+            if (!submitted) {
+                releaseUplinkSlot();
+            }
+        }
     }
 
     @Override

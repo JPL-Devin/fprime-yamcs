@@ -2,7 +2,6 @@ package gov.nasa.jpl.fprime.yamcs.filetransfer;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -14,6 +13,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 
 import org.junit.jupiter.api.Test;
+import org.yamcs.cmdhistory.CommandHistoryPublisher.AckStatus;
 import org.yamcs.protobuf.TransferDirection;
 import org.yamcs.protobuf.TransferState;
 
@@ -69,6 +69,18 @@ public class CfdpDownlinkHandlerTest {
         assertArrayEquals(content, bucket.objects.get("data/out.bin"));
         assertEquals(TransferState.COMPLETED, lastResolved.getTransferState());
         assertEquals(content.length, lastResolved.getTransferredSize());
+    }
+
+    @Test
+    public void completionPublishesVerifierAcks() {
+        CfdpDownlinkHandler h = handler(1024);
+        byte[] content = new byte[10];
+        runTransaction(h, 3, content, "/f.bin", 10);
+        // PENDING (at Metadata) must precede the terminal OK (at EOF).
+        int pending = listener.acks.indexOf(AckStatus.PENDING);
+        int ok = listener.acks.indexOf(AckStatus.OK);
+        assertTrue(pending >= 0 && ok >= 0 && pending < ok,
+                "expected PENDING then OK, got " + listener.acks);
     }
 
     @Test

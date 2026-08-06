@@ -191,10 +191,14 @@ public class CfdpDownlinkHandler {
         }
 
         if (inflight != null) {
-            if (inflight.transactionSeq == header.transactionSeq) {
+            if (inflight.transactionSeq == header.transactionSeq
+                    && inflight.declaredSize == md.fileSize
+                    && inflight.destinationFileName.equals(md.destinationFileName)) {
                 // Retransmitted Metadata for the transaction already being
                 // reassembled: ignore the duplicate rather than restarting.
                 // It still counts as link activity for the stall sweeper.
+                // A same-seq Metadata with a different size or destination is
+                // a genuinely new (wrapped-seq) transaction and supersedes.
                 inflightLastActivity = System.currentTimeMillis();
                 LOG.warn("Ignoring duplicate Metadata for in-flight transaction {}",
                         inflight.transactionSeq);

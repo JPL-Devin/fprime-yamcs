@@ -16,6 +16,7 @@ import com.google.protobuf.Timestamp;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.yamcs.filetransfer.InvalidRequestException;
 import org.yamcs.filetransfer.RemoteFileListMonitor;
 import org.yamcs.protobuf.ListFilesResponse;
 import org.yamcs.protobuf.RemoteFile;
@@ -105,6 +106,14 @@ public class RemoteFileListingHandler implements StreamSubscriber {
      */
     public void beginListing(String dirName) {
         expireStaleListings();
+        // Bound concurrent accumulators (symmetric with MAX_CACHED_LISTINGS)
+        // so repeated fetches of distinct paths cannot grow the map until
+        // the expiry sweep.
+        if (!inProgressListings.containsKey(dirName)
+                && inProgressListings.size() >= MAX_CACHED_LISTINGS) {
+            throw new InvalidRequestException("Too many listings in progress ("
+                    + MAX_CACHED_LISTINGS + "); wait for one to complete or expire");
+        }
         inProgressListings.put(dirName, new ListingAccumulator(dirName));
     }
 

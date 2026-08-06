@@ -41,6 +41,7 @@ public class CfdpUplinkHandlerTest {
         h.run(t, content);
 
         assertEquals(TransferState.COMPLETED, t.getTransferState());
+        assertEquals(content.length, t.getTransferredSize());
         // Metadata + 3 File Data (100+100+50) + EOF
         assertEquals(5, sent.size());
 
