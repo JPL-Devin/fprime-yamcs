@@ -64,7 +64,7 @@ dataLinks:
       - vcId: 1
         ocfPresent: false
         service: "PACKET"
-        maxPacketLength: 1024
+        maxPacketLength: 4096  # Allow packets spanning multiple TM frames (F Prime ComAggregator packet spanning)
         packetPreprocessorClassName: com.example.myproject.FprimePacketPreprocessor
         stream: "tm_realtime"
 
