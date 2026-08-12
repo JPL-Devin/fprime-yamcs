@@ -27,6 +27,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import urllib.request
+import webbrowser
 
 import yaml
 
@@ -45,6 +49,18 @@ class YamcsParser(ParserBase):
     def get_arguments(self) -> Dict[Tuple[str, ...], Dict[str, Any]]:
         """Arguments to handle deployments"""
         return {
+            ("-g", "--gui"): {
+                "choices": ["none", "html"],
+                "dest": "gui",
+                "type": str,
+                "default": "html",
+                "help": "Set the desired GUI system for running the deployment. [default: %(default)s]",
+            },
+            ("--skip-browser-open",): {
+                "dest": "browser_auto_open",
+                "action": "store_false",
+                "help": "Run YAMCS without auto-launching the default web browser",
+            },
             ("--yamcs-config-dir",): {
                 "action": "store",
                 "default": Path(__file__).resolve().parent / "yamcs" / "src" / "main" / "yamcs",
@@ -322,6 +338,56 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
     return  yamcs_working_config_dir, fprime_instance
 
 
+def yamcs_web_url(config_directory: Path) -> str:
+    """ Determine the YAMCS web interface URL from the YAMCS configuration
+
+    Reads the HttpServer service port from "etc/yamcs.yaml" under the supplied configuration directory,
+    falling back to the YAMCS default port (8090).
+
+    Args:
+        config_directory: The YAMCS configuration directory
+    Returns:
+        The URL of the YAMCS web interface
+    """
+    port = 8090
+    yamcs_yaml = config_directory / "etc" / "yamcs.yaml"
+    try:
+        with yamcs_yaml.open() as f:
+            for service in yaml.safe_load(f).get("services", []):
+                if service.get("class", "").endswith(".HttpServer"):
+                    port = service.get("args", {}).get("port", port)
+                    break
+    except Exception as exc:
+        print(f"[WARNING] Failed to read HTTP port from {yamcs_yaml}: {exc}", file=sys.stderr)
+    return f"http://127.0.0.1:{port}/"
+
+
+def launch_browser(parsed_args):
+    """ Open the YAMCS web interface in the default browser once it responds
+
+    Polls the YAMCS web interface in a background thread and opens the default web browser once YAMCS is serving,
+    mirroring the fprime-gds HTML GUI auto-open behavior.
+
+    Args:
+        parsed_args: parsed argument namespace
+    """
+    ui_url = yamcs_web_url(parsed_args.yamcs_config_dir)
+
+    def poll_and_open():
+        """Wait for the web interface to serve, then open the browser"""
+        for _ in range(120):
+            try:
+                urllib.request.urlopen(ui_url, timeout=1)
+                break
+            except Exception:
+                time.sleep(1)
+        print(f"[INFO] Launched UI at: {ui_url}")
+        if parsed_args.browser_auto_open:
+            webbrowser.open(ui_url, new=0, autoraise=True)
+
+    threading.Thread(target=poll_and_open, daemon=True).start()
+
+
 def launch_yamcs(parsed_args):
     """ Launch YAMCS """
     # Set up the environment variables required by YAMCS and fprime-yamcs
@@ -390,6 +456,8 @@ def main():
             parsed_args.yamcs_events_instance = fprime_instance
         launched_apps = [launch_app] if parsed_args.app is not None else []
         processes = [launcher(parsed_args) for launcher in launched_apps + [launch_yamcs]]
+        if parsed_args.gui == "html":
+            launch_browser(parsed_args)
         print("[INFO] F Prime/YAMCS is now running. CTRL-C to shutdown all components.")
         processes[-1].wait()
     except KeyboardInterrupt:
