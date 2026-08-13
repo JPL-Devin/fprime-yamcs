@@ -71,7 +71,7 @@ dataLinks:
       - vcId: 1
         ocfPresent: false
         service: "PACKET"
-        maxPacketLength: 1024
+        maxPacketLength: 65542  # CCSDS Space Packet maximum: 65536 data bytes + 6 header bytes
         packetPreprocessorClassName: com.example.myproject.FprimePacketPreprocessor
         stream: "tm_realtime"
 
