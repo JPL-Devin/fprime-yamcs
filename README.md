@@ -70,6 +70,36 @@ mdb:
 
 This is to allow for automatic dictionary generation. Users declining this service must specify: `--no-convert-dictionary`.
 
+## Optional: SDLS Key Management (ML-KEM-768 OTAR)
+
+An optional YAMCS service, `gov.jpl.nasa.fprime.keymgmt.KeyManagementService`, provides post-quantum session key establishment for SDLS-secured links, compliant with the CCSDS 355.1-B-1 (SDLS Extended Procedures) OTAR procedure in its Annex D "Baseline Implementation Mode". It is **not enabled by default**.
+
+The key model is a two-tier hierarchy: an ML-KEM-768 (FIPS 203) key pair is pre-loaded (private key on the spacecraft, public key on the ground) and serves as the master tier. Each rekey performs an ML-KEM encapsulation whose shared secret acts as the transaction master key (KEK), then uploads a fresh AES-256 session key under that KEK using a standard OTAR Command PDU, followed by Key Activation and Key Verification PDUs. The session key is simultaneously installed into YAMCS's built-in SDLS layer (AES-256-GCM) so both ends of the link stay synchronized.
+
+Requirements: an OpenSSL binary version 3.5 or newer (the first release with ML-KEM support), configurable via `opensslBinary`.
+
+Enable by adding the service to the instance configuration:
+
+```yaml
+services:
+  - class: gov.jpl.nasa.fprime.keymgmt.KeyManagementService
+    args:
+      publicKeyFile: etc/mlkem768-pub.pem   # spacecraft ML-KEM-768 public key (PEM)
+      kemApid: 0x20                         # APID of the KEM ciphertext packet
+      epApid: 0x21                          # APID of the SDLS EP PDU packets
+      uplinkLink: UDP_TC_OUT.vc1            # TC link handling the uplink
+      masterKeyId: 1                        # key ID reported for the KEM-derived KEK
+      firstSessionKeyId: 128                # session key IDs count up from here
+      opensslBinary: openssl                # OpenSSL >= 3.5
+      sdlsTargets:                          # ground SDLS SAs to rekey (optional)
+        - link: UDP_TC_OUT
+          spi: 1
+```
+
+A minimal operator UI is served at `http://<yamcs>/keymgmt/` with an "Uplink New Key" button, key inventory, and lifecycle states. The HTTP API endpoints are `POST /keymgmt/api/rekey`, `GET /keymgmt/api/inventory`, and `GET /keymgmt/api/status` (all require the `ControlLinks` system privilege).
+
+The flight-side counterpart (KEM decapsulation and EP PDU processing in F´) is under development; until it can emit Key Verification replies, keys report as "unverified".
+
 ## Caveats
 
 Currently, the default configuration of YAMCS requires F Prime to connect a CCSDS TC/TM framer/deframer to the Drv.Udp component ensuring that UDP is the transport mechanism.

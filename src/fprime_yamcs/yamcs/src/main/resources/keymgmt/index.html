@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SDLS Key Management</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 720px; color: #222; }
+  h1 { font-size: 1.4rem; }
+  button { font-size: 1rem; padding: 0.6rem 1.4rem; border: none; border-radius: 6px;
+           background: #0b5fff; color: #fff; cursor: pointer; }
+  button:disabled { background: #9bb8f5; cursor: wait; }
+  table { border-collapse: collapse; margin-top: 1.5rem; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.8rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f4f6f8; }
+  #status { margin-top: 1rem; padding: 0.6rem 1rem; border-radius: 6px; display: none; }
+  .ok { background: #e6f6e6; color: #1a6b1a; display: block !important; }
+  .err { background: #fdecec; color: #9b1c1c; display: block !important; }
+  .badge { padding: 0.1rem 0.5rem; border-radius: 8px; font-size: 0.8rem; }
+  .ACTIVE { background: #e6f6e6; color: #1a6b1a; }
+  .PRE_ACTIVATION { background: #fff6de; color: #7a5b00; }
+  .DEACTIVATED, .DESTROYED { background: #eee; color: #555; }
+</style>
+</head>
+<body>
+<h1>SDLS Key Management (ML-KEM-768 / CCSDS 355.1-B-1 OTAR)</h1>
+<p>Establishes a new AES-256 session key: ML-KEM encapsulation against the
+pre-loaded spacecraft public key, OTAR upload under the derived KEK,
+activation, verification, and ground SDLS synchronization.</p>
+<button id="rekey">Uplink New Key</button>
+<div id="status"></div>
+<table>
+  <thead><tr><th>Key ID</th><th>State</th><th>Verified</th><th>Last transition</th></tr></thead>
+  <tbody id="keys"><tr><td colspan="4">No keys managed yet.</td></tr></tbody>
+</table>
+<script>
+const statusBox = document.getElementById('status');
+const button = document.getElementById('rekey');
+
+async function refreshInventory() {
+  const resp = await fetch('api/inventory');
+  if (!resp.ok) return;
+  const data = await resp.json();
+  const tbody = document.getElementById('keys');
+  if (!data.keys.length) return;
+  tbody.innerHTML = '';
+  data.keys.sort((a, b) => b.keyId - a.keyId).forEach(k => {
+    const tr = document.createElement('tr');
+    const cells = [
+      k.keyId,
+      `<span class="badge ${k.state}">${k.state}</span>`,
+      k.verified ? 'yes' : 'unverified',
+      new Date(k.lastTransitionMillis).toISOString(),
+    ];
+    tr.innerHTML = cells.map(c => `<td>${c}</td>`).join('');
+    tbody.appendChild(tr);
+  });
+}
+
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  statusBox.className = '';
+  try {
+    const resp = await fetch('api/rekey', { method: 'POST' });
+    const data = await resp.json();
+    statusBox.textContent = data.message || `HTTP ${resp.status}`;
+    statusBox.className = (resp.ok && data.state === 'success') ? 'ok' : 'err';
+  } catch (e) {
+    statusBox.textContent = 'Request failed: ' + e;
+    statusBox.className = 'err';
+  } finally {
+    button.disabled = false;
+    refreshInventory();
+  }
+});
+
+refreshInventory();
+setInterval(refreshInventory, 5000);
+</script>
+</body>
+</html>
