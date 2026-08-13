@@ -77,6 +77,7 @@ public class KeyManagementService extends AbstractYamcsService {
 
     // Runtime
     private MlKem768 mlkem;
+    private LinkManager linkManager;
     private TcPacketHandler uplinkLink;
     private EventProducer eventProducer;
     private final KeyInventory inventory = new KeyInventory();
@@ -167,7 +168,7 @@ public class KeyManagementService extends AbstractYamcsService {
     protected void doStart() {
         eventProducer = EventProducerFactory.getEventProducer(yamcsInstance, "KeyManagement", 10000);
 
-        LinkManager linkManager = YamcsServer.getServer().getInstance(yamcsInstance).getLinkManager();
+        linkManager = YamcsServer.getServer().getInstance(yamcsInstance).getLinkManager();
         Link link = linkManager.getLink(uplinkLinkName);
         if (!(link instanceof TcPacketHandler)) {
             notifyFailed(new IllegalStateException("Link " + uplinkLinkName
@@ -204,7 +205,10 @@ public class KeyManagementService extends AbstractYamcsService {
      * @return the resulting status (also retrievable via {@link #getLastStatus})
      */
     public synchronized RekeyStatus rekey() {
-        int sessionKeyId = nextSessionKeyId.getAndIncrement();
+        // Key IDs are 16-bit on the wire; wrap instead of colliding via
+        // truncation (register() rejects IDs still in use after a wrap)
+        int sessionKeyId = nextSessionKeyId
+                .getAndUpdate(i -> i >= 0xFFFF ? firstSessionKeyId : i + 1);
         byte[] sessionKey = new byte[EpPduBuilder.SESSION_KEY_LENGTH];
         MlKem768.Encapsulation encapsulation = null;
         try {
@@ -236,7 +240,6 @@ public class KeyManagementService extends AbstractYamcsService {
             if (!sdlsTargets.isEmpty() && sdlsInstallDelayMs > 0) {
                 Thread.sleep(sdlsInstallDelayMs);
             }
-            LinkManager linkManager = YamcsServer.getServer().getInstance(yamcsInstance).getLinkManager();
             for (SdlsTarget target : sdlsTargets) {
                 SdlsSecurityAssociation sa = resolveSa(linkManager, target);
                 if (sa == null) {

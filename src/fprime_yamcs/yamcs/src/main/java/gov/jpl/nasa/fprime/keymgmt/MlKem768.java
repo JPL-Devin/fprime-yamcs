@@ -112,7 +112,10 @@ public class MlKem768 {
         }
     }
 
-    /** Overwrite file contents before deletion so the secret does not linger on disk. */
+    /**
+     * Overwrite file contents before deletion. Best-effort only: journaling
+     * filesystems and SSD wear leveling may retain the original blocks.
+     */
     private static void shred(Path file) throws IOException {
         if (Files.exists(file)) {
             Files.write(file, new byte[(int) Files.size(file)]);

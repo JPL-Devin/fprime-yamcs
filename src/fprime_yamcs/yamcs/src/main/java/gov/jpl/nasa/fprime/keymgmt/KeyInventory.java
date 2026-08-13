@@ -1,9 +1,9 @@
 package gov.jpl.nasa.fprime.keymgmt;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Tracks the CCSDS 355.1-B-1 lifecycle state of each managed session key:
@@ -49,7 +49,7 @@ public class KeyInventory {
         }
     }
 
-    private final Map<Integer, KeyRecord> records = new ConcurrentHashMap<>();
+    private final Map<Integer, KeyRecord> records = new HashMap<>();
 
     /** Register a freshly uploaded key in Pre-Activation state. */
     public synchronized KeyRecord register(int keyId) {
@@ -85,11 +85,11 @@ public class KeyInventory {
         record.verified = true;
     }
 
-    public KeyRecord get(int keyId) {
+    public synchronized KeyRecord get(int keyId) {
         return records.get(keyId);
     }
 
-    public List<KeyRecord> list() {
+    public synchronized List<KeyRecord> list() {
         return new ArrayList<>(records.values());
     }
 

@@ -92,12 +92,15 @@ services:
       masterKeyId: 1                        # key ID reported for the KEM-derived KEK
       firstSessionKeyId: 128                # session key IDs count up from here
       opensslBinary: openssl                # OpenSSL >= 3.5
+      sdlsInstallDelayMs: 500               # drain time before ground SAs switch to the new key
       sdlsTargets:                          # ground SDLS SAs to rekey (optional)
         - link: UDP_TC_OUT
           spi: 1
 ```
 
-A minimal operator UI is served at `http://<yamcs>/keymgmt/` with an "Uplink New Key" button, key inventory, and lifecycle states. The HTTP API endpoints are `POST /keymgmt/api/rekey`, `GET /keymgmt/api/inventory`, and `GET /keymgmt/api/status` (all require the `ControlLinks` system privilege).
+A minimal operator UI is served at `http://<yamcs>/keymgmt/` with an "Uplink New Key" button, key inventory, and lifecycle states. The HTTP API endpoints are `POST /keymgmt/api/rekey`, `GET /keymgmt/api/inventory`, and `GET /keymgmt/api/status` (all require the `ControlLinks` system privilege). Note that YAMCS security is disabled in the default fprime-yamcs configuration; enable it (`yamcs.yaml` `security` section) before exposing the rekey endpoint beyond a trusted network.
+
+An end-to-end integration test (fake spacecraft that decrypts the SDLS frames, decapsulates the KEM ciphertext, and recovers the OTAR session key) is provided in `src/fprime_yamcs/yamcs/src/test/int/`; the unit test `MlKem768Test` runs a real OpenSSL round trip when an OpenSSL >= 3.5 binary is available (override the binary with the `KEYMGMT_TEST_OPENSSL` environment variable).
 
 The ML-KEM-768 ciphertext (1088 bytes) exceeds the default 1024-byte TC frame limit, so it is fragmented across KEM Establishment packets: `version(1) | masterKeyId(2) | fragIndex(1) | fragCount(1) | fragment`. The recipient concatenates fragments 0..fragCount-1 to recover the ciphertext.
 
