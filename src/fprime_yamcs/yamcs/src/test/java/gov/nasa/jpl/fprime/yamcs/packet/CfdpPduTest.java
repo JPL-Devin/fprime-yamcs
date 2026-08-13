@@ -84,6 +84,20 @@ public class CfdpPduTest {
     }
 
     @Test
+    public void crcFlagRejected() {
+        byte[] pdu = CfdpPdu.encodeEof(1, 2, 0, 0, 0, 0);
+        pdu[0] |= 0x02; // CRC present
+        assertThrows(IllegalArgumentException.class, () -> CfdpPdu.decodeHeader(pdu, 0));
+    }
+
+    @Test
+    public void largeFileFlagRejected() {
+        byte[] pdu = CfdpPdu.encodeEof(1, 2, 0, 0, 0, 0);
+        pdu[0] |= 0x01; // large file
+        assertThrows(IllegalArgumentException.class, () -> CfdpPdu.decodeHeader(pdu, 0));
+    }
+
+    @Test
     public void overlongFileNamesRejected() {
         String longName = "x".repeat(256);
         assertThrows(IllegalArgumentException.class,

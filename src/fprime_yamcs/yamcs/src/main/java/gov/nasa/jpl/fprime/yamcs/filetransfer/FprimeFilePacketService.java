@@ -20,7 +20,6 @@ import org.yamcs.filetransfer.FileTransfer;
 import org.yamcs.filetransfer.InvalidRequestException;
 import org.yamcs.filetransfer.TransferOptions;
 import org.yamcs.protobuf.FileTransferCapabilities;
-import org.yamcs.protobuf.TransferDirection;
 import org.yamcs.xtce.MetaCommand;
 import org.yamcs.yarch.Stream;
 import org.yamcs.yarch.StreamSubscriber;
@@ -416,45 +415,8 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
                                     String objectName, String destinationEntity,
                                     String remotePath, TransferOptions options)
             throws IOException {
-        // Parameter semantics per YAMCS FileTransferApi.createTransfer:
-        // destinationEntity is the remote entity *name* ("spacecraft"); the
-        // remotePath string is the actual path on the spacecraft where the
-        // file should land.
-        if (sourceBucket == null) {
-            throw new InvalidRequestException("sourceBucket is required");
-        }
-        if (objectName == null || objectName.isEmpty()) {
-            throw new InvalidRequestException("objectName is required");
-        }
-        // Reserve the backlog slot before fetching so rejected requests
-        // never pin the file bytes in memory. Bounded wait so a stalled
-        // storage backend cannot pin the API thread indefinitely.
-        reserveUplinkSlot();
-        boolean submitted = false;
-        try {
-            byte[] content = fetchObject(sourceBucket, objectName);
-            if (content == null) {
-                throw new InvalidRequestException(
-                        "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
-            }
-            if (content.length > maxFileSize) {
-                throw new InvalidRequestException("Object '" + objectName + "' is "
-                        + content.length + " bytes, larger than maxFileSize " + maxFileSize);
-            }
-
-            String dest = (remotePath == null || remotePath.isEmpty()) ? objectName : remotePath;
-            FprimeFileTransfer transfer = new FprimeFileTransfer(
-                    nextTransferId(), sourceBucket.getName(), objectName, dest,
-                    content.length, TransferDirection.UPLOAD, TRANSFER_TYPE, false);
-            submitReservedUplink(uplinkExecutor, transfer,
-                    () -> uplinkHandler.run(transfer, content));
-            submitted = true;
-            return transfer;
-        } finally {
-            if (!submitted) {
-                releaseUplinkSlot();
-            }
-        }
+        return startUploadCommon(sourceBucket, objectName, remotePath, TRANSFER_TYPE,
+                maxFileSize, uplinkExecutor, (t, content) -> uplinkHandler.run(t, content));
     }
 
     @Override

@@ -157,6 +157,41 @@ public class CfdpDownlinkHandlerTest {
     }
 
     @Test
+    public void duplicateFileDataDoesNotSatisfyCompleteness() {
+        byte[] content = new byte[10];
+        new Random(2).nextBytes(content);
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        // Same first half delivered twice; second half lost. Total payload
+        // bytes equal the declared size, but coverage does not.
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 1, 0, content, 0, 5));
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 1, 0, content, 0, 5));
+        feed(h, CfdpPdu.encodeEof(REMOTE, LOCAL, 1, CfdpPdu.CONDITION_NO_ERROR,
+                CfdpChecksum.of(content), 10));
+
+        assertEquals(TransferState.FAILED, lastResolved.getTransferState());
+        assertTrue(lastResolved.getFailuredReason().contains("incomplete"));
+        assertTrue(bucket.objects.isEmpty());
+    }
+
+    @Test
+    public void overlappingFileDataCompletesOnFullCoverage() {
+        byte[] content = new byte[10];
+        new Random(3).nextBytes(content);
+        CfdpDownlinkHandler h = handler(1024);
+        feed(h, CfdpPdu.encodeMetadata(REMOTE, LOCAL, 1, 10, "s", "/d.bin"));
+        // Overlapping ranges [0,6) and [4,10) cover the whole file.
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 1, 0, content, 0, 6));
+        feed(h, CfdpPdu.encodeFileData(REMOTE, LOCAL, 1, 4, content, 4, 6));
+        feed(h, CfdpPdu.encodeEof(REMOTE, LOCAL, 1, CfdpPdu.CONDITION_NO_ERROR,
+                CfdpChecksum.of(content), 10));
+
+        assertEquals(TransferState.COMPLETED, lastResolved.getTransferState());
+        assertArrayEquals(content, bucket.objects.get("d.bin"));
+        assertEquals(10, lastResolved.getTransferredSize());
+    }
+
+    @Test
     public void bucketWriteFailureFailsTransfer() {
         byte[] content = new byte[10];
         bucket.failPuts = true;

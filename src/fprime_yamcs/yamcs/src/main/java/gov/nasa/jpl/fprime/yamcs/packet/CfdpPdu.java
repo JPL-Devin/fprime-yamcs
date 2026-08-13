@@ -124,6 +124,10 @@ public final class CfdpPdu {
         Type type = ((b0 >> 4) & 1) == 1 ? Type.FILE_DATA : Type.FILE_DIRECTIVE;
         boolean towardSender = ((b0 >> 3) & 1) == 1;
         boolean acknowledged = ((b0 >> 2) & 1) == 0;
+        // Reject the CRC and large-file header options: this codec never
+        // encodes them, and decoding them as content would corrupt fields.
+        require(((b0 >> 1) & 1) == 0, "unsupported CFDP option: CRC present");
+        require((b0 & 1) == 0, "unsupported CFDP option: large file");
         int dataFieldLength = ByteBuffer.wrap(bytes).getShort(offset + 1) & 0xFFFF;
         int b3 = bytes[offset + 3] & 0xFF;
         int entityIdLen = ((b3 >> 4) & 0x07) + 1;

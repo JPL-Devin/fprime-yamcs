@@ -22,7 +22,6 @@ import org.yamcs.filetransfer.RemoteFileListMonitor;
 import org.yamcs.filetransfer.TransferOptions;
 import org.yamcs.protobuf.FileTransferCapabilities;
 import org.yamcs.protobuf.ListFilesResponse;
-import org.yamcs.protobuf.TransferDirection;
 import org.yamcs.xtce.MetaCommand;
 import org.yamcs.yarch.Stream;
 import org.yamcs.yarch.StreamSubscriber;
@@ -382,42 +381,13 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
                                     String objectName, String destinationEntity,
                                     String remotePath, TransferOptions options)
             throws IOException {
-        if (sourceBucket == null) {
-            throw new InvalidRequestException("sourceBucket is required");
-        }
-        if (objectName == null || objectName.isEmpty()) {
-            throw new InvalidRequestException("objectName is required");
-        }
-        // Reserve the backlog slot before fetching so rejected requests
-        // never pin the file bytes in memory. Bounded wait so a stalled
-        // storage backend cannot pin the API thread indefinitely.
-        reserveUplinkSlot();
-        boolean submitted = false;
-        try {
-            byte[] content = fetchObject(sourceBucket, objectName);
-            if (content == null) {
-                throw new InvalidRequestException(
-                        "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
-            }
-            if (content.length > maxFileSize) {
-                throw new InvalidRequestException("Object '" + objectName + "' is "
-                        + content.length + " bytes, larger than maxFileSize " + maxFileSize);
-            }
+        return startUploadCommon(sourceBucket, objectName, remotePath, TRANSFER_TYPE,
+                maxFileSize, uplinkExecutor, (t, content) -> uplinkHandler.run(t, content));
+    }
 
-            String dest = (remotePath == null || remotePath.isEmpty()) ? objectName : remotePath;
-            FprimeFileTransfer transfer = new FprimeFileTransfer(
-                    nextTransferId(), sourceBucket.getName(), objectName, dest,
-                    content.length, TransferDirection.UPLOAD, TRANSFER_TYPE, false);
-            transfer.setEntityIds(localEntityId, remoteEntityId);
-            submitReservedUplink(uplinkExecutor, transfer,
-                    () -> uplinkHandler.run(transfer, content));
-            submitted = true;
-            return transfer;
-        } finally {
-            if (!submitted) {
-                releaseUplinkSlot();
-            }
-        }
+    @Override
+    protected void decorateUploadTransfer(FprimeFileTransfer transfer) {
+        transfer.setEntityIds(localEntityId, remoteEntityId);
     }
 
     @Override

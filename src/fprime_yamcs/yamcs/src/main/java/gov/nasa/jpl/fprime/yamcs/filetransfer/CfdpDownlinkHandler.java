@@ -2,6 +2,7 @@ package gov.nasa.jpl.fprime.yamcs.filetransfer;
 
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -62,6 +63,11 @@ public class CfdpDownlinkHandler {
         final int declaredSize;
         int bytesReceived;
         final FprimeFileTransfer transfer;
+        // Merged [start, end) byte ranges covered so far. CFDP File Data
+        // PDUs carry no sequence index, so duplicates/overlaps must be
+        // deduplicated by extent or the EOF completeness check could pass
+        // with a gap in the buffer.
+        private final TreeMap<Integer, Integer> extents = new TreeMap<>();
 
         Reassembly(int transactionSeq, String dst, int size, FprimeFileTransfer transfer) {
             this.transactionSeq = transactionSeq;
@@ -69,6 +75,26 @@ public class CfdpDownlinkHandler {
             this.declaredSize = size;
             this.buffer = new byte[size];
             this.transfer = transfer;
+        }
+
+        /** Record [start, end) as received; bytesReceived counts coverage. */
+        void addExtent(int start, int end) {
+            if (end <= start) {
+                return;
+            }
+            Map.Entry<Integer, Integer> floor = extents.floorEntry(start);
+            int newStart = (floor != null && floor.getValue() >= start)
+                    ? floor.getKey() : start;
+            int newEnd = end;
+            int merged = 0;
+            var overlapping = extents.subMap(newStart, true, end, true);
+            for (Map.Entry<Integer, Integer> e : overlapping.entrySet()) {
+                merged += e.getValue() - e.getKey();
+                newEnd = Math.max(newEnd, e.getValue());
+            }
+            overlapping.clear();
+            extents.put(newStart, newEnd);
+            bytesReceived += (newEnd - newStart) - merged;
         }
     }
 
@@ -240,10 +266,7 @@ public class CfdpDownlinkHandler {
         }
         System.arraycopy(bytes, data.dataStart, inflight.buffer, data.offset, data.dataSize);
         inflightLastActivity = System.currentTimeMillis();
-        // Clamp: duplicate or overlapping File Data offsets must not inflate
-        // the reported progress past the declared file size.
-        inflight.bytesReceived = (int) Math.min((long) inflight.declaredSize,
-                (long) inflight.bytesReceived + data.dataSize);
+        inflight.addExtent(data.offset, data.offset + data.dataSize);
 
         inflight.transfer.setTransferredSize(inflight.bytesReceived);
         listener.stateChanged(inflight.transfer);
@@ -273,7 +296,7 @@ public class CfdpDownlinkHandler {
         }
         if (inflight.bytesReceived != inflight.declaredSize) {
             failInflight(String.format(
-                    "incomplete file: received %d of %d declared bytes",
+                    "incomplete file: covered %d of %d declared bytes",
                     inflight.bytesReceived, inflight.declaredSize));
             return;
         }

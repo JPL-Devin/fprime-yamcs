@@ -36,17 +36,28 @@ public class TcLinkUplinkTransport implements UplinkTransport {
     private static final Map<TcDataLink, LinkPacer> PACERS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
+    @FunctionalInterface
+    private interface SendAction {
+        void run() throws Exception;
+    }
+
     private static final class LinkPacer {
         private long nextSendAtMs;
 
         // Serializing concurrent senders behind the sleeping monitor is the
         // point: they must not send until the reserved interval elapses.
-        synchronized void pace(long delayMs) throws InterruptedException {
+        // The send itself runs inside the monitor so two senders sharing
+        // the link cannot pace, get preempted, and then send back-to-back.
+        synchronized void paceAndSend(long delayMs, SendAction action) throws Exception {
             long wait = nextSendAtMs - System.currentTimeMillis();
             if (wait > 0) {
                 Thread.sleep(wait);
             }
-            nextSendAtMs = System.currentTimeMillis() + delayMs;
+            try {
+                action.run();
+            } finally {
+                nextSendAtMs = System.currentTimeMillis() + delayMs;
+            }
         }
     }
 
@@ -107,12 +118,7 @@ public class TcLinkUplinkTransport implements UplinkTransport {
      */
     @Override
     public void send(byte[] spacePacket) throws Exception {
-        // Give the spacecraft-side accumulator a moment to drain between
-        // packets — across every service sharing this link, not just this
-        // transport instance.
-        if (interPacketDelayMs > 0) {
-            pacer.pace(interPacketDelayMs);
-        }
+        PreparedCommand pc;
         synchronized (this) {
             CommandId cmdId = CommandId.newBuilder()
                     .setGenerationTime(System.currentTimeMillis())
@@ -120,11 +126,23 @@ public class TcLinkUplinkTransport implements UplinkTransport {
                     .setSequenceNumber(commandSequence++)
                     .setCommandName(origin + "/uplinkPacket")
                     .build();
-            PreparedCommand pc = new PreparedCommand(cmdId);
+            pc = new PreparedCommand(cmdId);
             pc.setBinary(spacePacket);
-            if (!link.sendCommand(pc)) {
-                throw new IllegalStateException("Link rejected packet (queue full or disabled)");
-            }
+        }
+        // Give the spacecraft-side accumulator a moment to drain between
+        // packets — across every service sharing this link, not just this
+        // transport instance. Pacing and sending are atomic on the shared
+        // per-link pacer so the spacing invariant holds across services.
+        if (interPacketDelayMs > 0) {
+            pacer.paceAndSend(interPacketDelayMs, () -> doSend(pc));
+        } else {
+            doSend(pc);
+        }
+    }
+
+    private void doSend(PreparedCommand pc) {
+        if (!link.sendCommand(pc)) {
+            throw new IllegalStateException("Link rejected packet (queue full or disabled)");
         }
     }
 }

@@ -432,7 +432,12 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     protected void submitUplink(ExecutorService uplinkExecutor,
                                 FprimeFileTransfer transfer, Runnable task) {
         reserveUplinkSlot();
-        submitReservedUplink(uplinkExecutor, transfer, task);
+        try {
+            submitReservedUplink(uplinkExecutor, transfer, task);
+        } catch (RuntimeException e) {
+            releaseUplinkSlot();
+            throw e;
+        }
     }
 
     /**
@@ -454,7 +459,11 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
         pendingUplinks.decrementAndGet();
     }
 
-    /** Submit an uplink whose backlog slot is already reserved. */
+    /**
+     * Submit an uplink whose backlog slot is already reserved. On failure
+     * the transfer is failed and the exception rethrown; releasing the
+     * reserved slot is the caller's responsibility (single owner).
+     */
     protected void submitReservedUplink(ExecutorService uplinkExecutor,
                                         FprimeFileTransfer transfer, Runnable task) {
         addTransfer(transfer);
@@ -468,10 +477,68 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
                 }
             });
         } catch (RuntimeException e) {
-            pendingUplinks.decrementAndGet();
             failTransfer(transfer, AckStatus.NOK, "uplink executor rejected: " + e.getMessage());
             throw e;
         }
+    }
+
+    /**
+     * Shared upload path: validates the request, reserves a backlog slot
+     * before fetching so rejected requests never pin file bytes in memory,
+     * builds the transfer (with {@link #decorateUploadTransfer} applied),
+     * and submits it to the uplink executor.
+     */
+    protected FileTransfer startUploadCommon(Bucket sourceBucket, String objectName,
+                                             String remotePath, String transferType,
+                                             int maxFileSize, ExecutorService uplinkExecutor,
+                                             UplinkRunner runner) throws IOException {
+        // Parameter semantics per YAMCS FileTransferApi.createTransfer:
+        // destinationEntity is the remote entity *name* ("spacecraft"); the
+        // remotePath string is the actual path on the spacecraft where the
+        // file should land.
+        if (sourceBucket == null) {
+            throw new InvalidRequestException("sourceBucket is required");
+        }
+        if (objectName == null || objectName.isEmpty()) {
+            throw new InvalidRequestException("objectName is required");
+        }
+        reserveUplinkSlot();
+        boolean submitted = false;
+        try {
+            byte[] content = fetchObject(sourceBucket, objectName);
+            if (content == null) {
+                throw new InvalidRequestException(
+                        "No such object '" + objectName + "' in bucket " + sourceBucket.getName());
+            }
+            if (content.length > maxFileSize) {
+                throw new InvalidRequestException("Object '" + objectName + "' is "
+                        + content.length + " bytes, larger than maxFileSize " + maxFileSize);
+            }
+
+            String dest = (remotePath == null || remotePath.isEmpty()) ? objectName : remotePath;
+            FprimeFileTransfer transfer = new FprimeFileTransfer(
+                    nextTransferId(), sourceBucket.getName(), objectName, dest,
+                    content.length, TransferDirection.UPLOAD, transferType, false);
+            decorateUploadTransfer(transfer);
+            submitReservedUplink(uplinkExecutor, transfer,
+                    () -> runner.run(transfer, content));
+            submitted = true;
+            return transfer;
+        } finally {
+            if (!submitted) {
+                releaseUplinkSlot();
+            }
+        }
+    }
+
+    /** Runs a submitted uplink task with the fetched file contents. */
+    @FunctionalInterface
+    protected interface UplinkRunner {
+        void run(FprimeFileTransfer transfer, byte[] content);
+    }
+
+    /** Hook for subclasses to stamp protocol-specific upload transfer fields. */
+    protected void decorateUploadTransfer(FprimeFileTransfer transfer) {
     }
 
     /**
@@ -656,6 +723,14 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
 
     @Override
     public void saveFileList(ListFilesResponse listing) {
+        // Normalize the cache key the same way getFileList does, so a
+        // listing saved for "" is found again when queried as ".".
+        if (listing != null
+                && !listing.getRemotePath().equals(normalizeDirName(listing.getRemotePath()))) {
+            listing = listing.toBuilder()
+                    .setRemotePath(normalizeDirName(listing.getRemotePath()))
+                    .build();
+        }
         listingHandler.saveFileList(listing);
     }
 
