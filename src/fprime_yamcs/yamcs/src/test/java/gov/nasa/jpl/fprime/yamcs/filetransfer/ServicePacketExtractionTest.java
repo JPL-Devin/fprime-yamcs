@@ -62,6 +62,29 @@ public class ServicePacketExtractionTest {
     }
 
     @Test
+    public void pduOffsetSkipsFileDescriptor() {
+        // F´ CfdpManager frames PDUs behind the FW_PACKET_FILE descriptor.
+        byte[] pdu = CfdpPdu.encodeMetadata(2, 1, 7, 10, "s", "/d.bin");
+        byte[] framed = new byte[FilePacket.DESCRIPTOR_LEN + pdu.length];
+        framed[0] = (byte) (FilePacket.FILE_DESCRIPTOR >> 8);
+        framed[1] = (byte) FilePacket.FILE_DESCRIPTOR;
+        System.arraycopy(pdu, 0, framed, FilePacket.DESCRIPTOR_LEN, pdu.length);
+        byte[] packet = SpacePacket.wrapTelecommand(framed, APID, 0);
+
+        int off = CfdpFileTransferService.pduOffset(packet);
+        assertEquals(SpacePacket.PRIMARY_HEADER_LEN + FilePacket.DESCRIPTOR_LEN, off);
+        assertEquals(7, CfdpPdu.decodeHeader(packet, off).transactionSeq);
+    }
+
+    @Test
+    public void pduOffsetAcceptsRawPdu() {
+        byte[] packet = cfdpSpacePacket();
+        int off = CfdpFileTransferService.pduOffset(packet);
+        assertEquals(SpacePacket.PRIMARY_HEADER_LEN, off);
+        assertEquals(7, CfdpPdu.decodeHeader(packet, off).transactionSeq);
+    }
+
+    @Test
     public void filePacketOnConfiguredApidPassesThrough() {
         byte[] packet = filePacketSpacePacket();
         assertSame(packet, FprimeFilePacketService.extractFilePacket(packet, APID));

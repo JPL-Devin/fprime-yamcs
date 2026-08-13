@@ -344,7 +344,7 @@ public class AbstractFprimeFileTransferServiceTest {
         DispatchTestService svc = new DispatchTestService();
         FakeBucket bucket = new FakeBucket();
         FprimeFileTransfer t = svc.startDownloadCommon(DOWNLINK_CMD, "unavailable",
-                "TEST", "/logs/a.bin", bucket, null, "src", "dst", "Start packet");
+                "TEST", "/logs/a.bin", bucket, null, "src", "dst", Map.of(), "Start packet");
 
         // destPath derived from the source basename.
         assertEquals("a.bin", t.getObjectName());
@@ -369,10 +369,10 @@ public class AbstractFprimeFileTransferServiceTest {
         DispatchTestService svc = new DispatchTestService();
         FakeBucket bucket = new FakeBucket();
         svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
-                "a.bin", bucket, null, "src", "dst", "Start packet");
+                "a.bin", bucket, null, "src", "dst", Map.of(), "Start packet");
         InvalidRequestException e = assertThrows(InvalidRequestException.class,
                 () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
-                        "other/a.bin", bucket, "a.bin", "src", "dst", "Start packet"));
+                        "other/a.bin", bucket, "a.bin", "src", "dst", Map.of(), "Start packet"));
         assertTrue(e.getMessage().contains("already pending"));
     }
 
@@ -382,17 +382,17 @@ public class AbstractFprimeFileTransferServiceTest {
         FakeBucket bucket = new FakeBucket();
         assertThrows(InvalidRequestException.class,
                 () -> svc.startDownloadCommon(null, "unavailable", "TEST",
-                        "a.bin", bucket, null, "src", "dst", "Start packet"));
+                        "a.bin", bucket, null, "src", "dst", Map.of(), "Start packet"));
         assertThrows(InvalidRequestException.class,
                 () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
-                        "", bucket, null, "src", "dst", "Start packet"));
+                        "", bucket, null, "src", "dst", Map.of(), "Start packet"));
         assertThrows(InvalidRequestException.class,
                 () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
-                        "a.bin", null, null, "src", "dst", "Start packet"));
+                        "a.bin", null, null, "src", "dst", Map.of(), "Start packet"));
         // Trailing-slash source path yields an empty basename.
         InvalidRequestException e = assertThrows(InvalidRequestException.class,
                 () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
-                        "/logs/", bucket, null, "src", "dst", "Start packet"));
+                        "/logs/", bucket, null, "src", "dst", Map.of(), "Start packet"));
         assertTrue(e.getMessage().contains("destination file name"));
     }
 
@@ -403,14 +403,14 @@ public class AbstractFprimeFileTransferServiceTest {
         FakeBucket bucket = new FakeBucket();
         assertThrows(java.io.IOException.class,
                 () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
-                        "a.bin", bucket, null, "src", "dst", "Start packet"));
+                        "a.bin", bucket, null, "src", "dst", Map.of(), "Start packet"));
         FileTransfer failed = svc.getTransfers(null).get(0);
         assertEquals(TransferState.FAILED, failed.getTransferState());
 
         // The pending slot was released, so a retry is not blocked.
         svc.failDispatch = false;
         FprimeFileTransfer retry = svc.startDownloadCommon(DOWNLINK_CMD, "unavailable",
-                "TEST", "a.bin", bucket, null, "src", "dst", "Start packet");
+                "TEST", "a.bin", bucket, null, "src", "dst", Map.of(), "Start packet");
         assertEquals(TransferState.QUEUED, retry.getTransferState());
     }
 
@@ -420,11 +420,11 @@ public class AbstractFprimeFileTransferServiceTest {
         FakeBucket bucket = new FakeBucket();
         for (int i = 0; i < AbstractFprimeFileTransferService.MAX_PENDING_DOWNLOADS; i++) {
             svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
-                    "f" + i + ".bin", bucket, null, "src", "dst", "Start packet");
+                    "f" + i + ".bin", bucket, null, "src", "dst", Map.of(), "Start packet");
         }
         assertThrows(org.yamcs.filetransfer.InvalidRequestException.class,
                 () -> svc.startDownloadCommon(DOWNLINK_CMD, "unavailable", "TEST",
-                        "overflow.bin", bucket, null, "src", "dst", "Start packet"));
+                        "overflow.bin", bucket, null, "src", "dst", Map.of(), "Start packet"));
     }
 
     @Test
@@ -432,9 +432,9 @@ public class AbstractFprimeFileTransferServiceTest {
         DispatchTestService svc = new DispatchTestService();
         FakeBucket bucket = new FakeBucket();
         FprimeFileTransfer stale = svc.startDownloadCommon(DOWNLINK_CMD, "unavailable",
-                "TEST", "stale.bin", bucket, null, "src", "dst", "Start packet");
+                "TEST", "stale.bin", bucket, null, "src", "dst", Map.of(), "Start packet");
         FprimeFileTransfer fresh = svc.startDownloadCommon(DOWNLINK_CMD, "unavailable",
-                "TEST", "fresh.bin", bucket, null, "src", "dst", "Start packet");
+                "TEST", "fresh.bin", bucket, null, "src", "dst", Map.of(), "Start packet");
         stale.setStartTime(System.currentTimeMillis() - 60_000);
 
         svc.sweepPendingDownloadTimeouts(30_000, "Start packet");

@@ -18,6 +18,7 @@ import org.yamcs.protobuf.TransferState;
 
 import gov.nasa.jpl.fprime.yamcs.packet.CfdpChecksum;
 import gov.nasa.jpl.fprime.yamcs.packet.CfdpPdu;
+import gov.nasa.jpl.fprime.yamcs.packet.FilePacket;
 import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
 
 public class CfdpUplinkHandlerTest {
@@ -52,7 +53,10 @@ public class CfdpUplinkHandlerTest {
             int seqCtrl = ((pkt[2] & 0xFF) << 8) | (pkt[3] & 0xFF);
             assertEquals(i, seqCtrl & 0x3FFF);
 
-            byte[] pdu = Arrays.copyOfRange(pkt, SpacePacket.PRIMARY_HEADER_LEN, pkt.length);
+            // Each packet carries the F´ FW_PACKET_FILE descriptor, then the PDU.
+            assertTrue(FilePacket.isFilePacket(pkt, SpacePacket.PRIMARY_HEADER_LEN));
+            byte[] pdu = Arrays.copyOfRange(pkt,
+                    SpacePacket.PRIMARY_HEADER_LEN + FilePacket.DESCRIPTOR_LEN, pkt.length);
             CfdpPdu.Header header = CfdpPdu.decodeHeader(pdu, 0);
             assertEquals(1, header.sourceEntityId);
             assertEquals(2, header.destinationEntityId);
@@ -87,7 +91,8 @@ public class CfdpUplinkHandlerTest {
     }
 
     private static int txOf(byte[] pkt) {
-        byte[] pdu = Arrays.copyOfRange(pkt, SpacePacket.PRIMARY_HEADER_LEN, pkt.length);
+        byte[] pdu = Arrays.copyOfRange(pkt,
+                SpacePacket.PRIMARY_HEADER_LEN + FilePacket.DESCRIPTOR_LEN, pkt.length);
         return CfdpPdu.decodeHeader(pdu, 0).transactionSeq;
     }
 

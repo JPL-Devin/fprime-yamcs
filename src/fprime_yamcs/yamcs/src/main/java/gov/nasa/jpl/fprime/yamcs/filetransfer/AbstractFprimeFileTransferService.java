@@ -325,6 +325,7 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
             String commandUnavailableMessage, String transferType,
             String sourcePath, Bucket destBucket, String destPath,
             String sourceFileNameArg, String destFileNameArg,
+            Map<String, Object> extraCommandArgs,
             String noResponseHint) throws IOException {
         if (command == null) {
             throw new InvalidRequestException(commandUnavailableMessage);
@@ -371,7 +372,9 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
         notifyStateChanged(transfer);
 
         try {
-            Map<String, Object> args = new HashMap<>();
+            // Fixed extras first (e.g. channelId/priority for F´ SendFile),
+            // then the path arguments so they cannot be overridden.
+            Map<String, Object> args = new HashMap<>(extraCommandArgs);
             args.put(sourceFileNameArg, sourcePath);
             args.put(destFileNameArg, destPath);
             CommandId cmdId = dispatchCommand(command, args,

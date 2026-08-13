@@ -8,12 +8,15 @@ import org.yamcs.protobuf.TransferState;
 
 import gov.nasa.jpl.fprime.yamcs.packet.CfdpChecksum;
 import gov.nasa.jpl.fprime.yamcs.packet.CfdpPdu;
+import gov.nasa.jpl.fprime.yamcs.packet.FilePacket;
 import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
 
 /**
  * Uplinks a file as a class-1 CFDP transaction (Metadata / File Data×N /
- * EOF), wrapping each PDU in a CCSDS space packet on the CFDP APID and
- * handing it to an {@link UplinkTransport}.
+ * EOF), framing each PDU behind the F´ {@code FW_PACKET_FILE} descriptor
+ * inside a CCSDS space packet on the CFDP APID and handing it to an
+ * {@link UplinkTransport}. The descriptor is how F´'s CfdpManager
+ * recognizes file traffic on the uplink.
  */
 public class CfdpUplinkHandler {
 
@@ -22,10 +25,11 @@ public class CfdpUplinkHandler {
     /**
      * Largest chunk that keeps the File Data PDU within the CFDP 16-bit data
      * field length and the resulting space packet within the CCSDS 16-bit
-     * length field: PDU header (8) + offset (4) + chunk.
+     * length field: descriptor (2) + PDU header (8) + offset (4) + chunk.
      */
     public static final int MAX_CHUNK_SIZE = Math.min(0xFFFF - 4,
-            SpacePacket.MAX_PAYLOAD_LEN - CfdpPdu.HEADER_LEN - 4);
+            SpacePacket.MAX_PAYLOAD_LEN - FilePacket.DESCRIPTOR_LEN
+                    - CfdpPdu.HEADER_LEN - 4);
 
     private final UplinkTransport transport;
     private final int cfdpApid;
@@ -112,7 +116,13 @@ public class CfdpUplinkHandler {
     }
 
     private void send(byte[] pdu) throws Exception {
+        // F´ routes uplinked packets by the leading FwPacketDescriptorType
+        // word; CfdpManager only accepts PDUs behind FW_PACKET_FILE.
+        byte[] framed = new byte[FilePacket.DESCRIPTOR_LEN + pdu.length];
+        framed[0] = (byte) (FilePacket.FILE_DESCRIPTOR >> 8);
+        framed[1] = (byte) FilePacket.FILE_DESCRIPTOR;
+        System.arraycopy(pdu, 0, framed, FilePacket.DESCRIPTOR_LEN, pdu.length);
         int seq = seqCount.getAndUpdate(s -> (s + 1) & 0x3FFF);
-        transport.send(SpacePacket.wrapTelecommand(pdu, cfdpApid, seq));
+        transport.send(SpacePacket.wrapTelecommand(framed, cfdpApid, seq));
     }
 }

@@ -123,6 +123,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
     private String fileDownlinkCommandName;
     private String sourceFileNameArg;
     private String destFileNameArg;
+    private Map<String, Object> downlinkCommandArgs;
     private String listDirectoryCommandName;
     private String listDirDirNameArg;
     // Max wall-clock time a startDownload() transfer may wait for a Start
@@ -175,6 +176,9 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         spec.addOption("fileDownlinkCommand", OptionType.STRING).withDefault("");
         spec.addOption("sourceFileNameArg", OptionType.STRING).withDefault("sourceFileName");
         spec.addOption("destFileNameArg", OptionType.STRING).withDefault("destFileName");
+        // Fixed values for any remaining downlink-command arguments beyond
+        // the two path arguments.
+        spec.addOption("downlinkCommandArgs", OptionType.ANY);
         spec.addOption("listDirectoryCommand", OptionType.STRING).withDefault("");
         spec.addOption("listDirDirNameArg", OptionType.STRING).withDefault("dirName");
         // Stream carrying the decoded F´ events republished by the
@@ -204,6 +208,8 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         this.fileDownlinkCommandName = config.getString("fileDownlinkCommand", "");
         this.sourceFileNameArg = config.getString("sourceFileNameArg", "sourceFileName");
         this.destFileNameArg = config.getString("destFileNameArg", "destFileName");
+        this.downlinkCommandArgs = config.containsKey("downlinkCommandArgs")
+                ? config.getMap("downlinkCommandArgs") : Map.of();
         this.listDirectoryCommandName = config.getString("listDirectoryCommand", "");
         this.listDirDirNameArg = config.getString("listDirDirNameArg", "dirName");
         this.eventsStreamName = config.getString("eventsStream", "events_realtime");
@@ -439,7 +445,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         return startDownloadCommon(fileDownlinkCommand,
                 "Downlink command '" + fileDownlinkCommandName + "' not found in MDB",
                 TRANSFER_TYPE, sourcePath, destBucket, destPath,
-                sourceFileNameArg, destFileNameArg, "Start packet");
+                sourceFileNameArg, destFileNameArg, downlinkCommandArgs, "Start packet");
     }
 
     @Override

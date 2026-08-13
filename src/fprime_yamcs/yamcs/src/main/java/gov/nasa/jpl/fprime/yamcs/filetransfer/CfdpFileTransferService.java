@@ -30,6 +30,7 @@ import org.yamcs.yarch.YarchDatabase;
 import org.yamcs.yarch.YarchDatabaseInstance;
 
 import gov.nasa.jpl.fprime.yamcs.packet.CfdpPdu;
+import gov.nasa.jpl.fprime.yamcs.packet.FilePacket;
 import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
 
 /**
@@ -78,6 +79,12 @@ import gov.nasa.jpl.fprime.yamcs.packet.SpacePacket;
  *       fileDownlinkCommand: ""        # optional F´ command for startDownload
  *       sourceFileNameArg: sourceFileName  # downlink-command source-path argument name
  *       destFileNameArg: destFileName      # downlink-command destination-path argument name
+ *       downlinkCommandArgs:           # fixed values for remaining command args
+ *         channelId: 0                 # (example: F´ CfdpManager.SendFile)
+ *         destId: 1
+ *         cfdpClass: CLASS_1
+ *         keep: KEEP
+ *         priority: 0
  *       downloadTimeoutMs: 30000       # max wait for the spacecraft Metadata PDU
  * </pre>
  *
@@ -119,6 +126,7 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
     private String fileDownlinkCommandName;
     private String sourceFileNameArg;
     private String destFileNameArg;
+    private Map<String, Object> downlinkCommandArgs;
     private long downloadTimeoutMs;
 
     // Runtime
@@ -158,6 +166,10 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         spec.addOption("fileDownlinkCommand", OptionType.STRING).withDefault("");
         spec.addOption("sourceFileNameArg", OptionType.STRING).withDefault("sourceFileName");
         spec.addOption("destFileNameArg", OptionType.STRING).withDefault("destFileName");
+        // Fixed values for the downlink command's remaining arguments
+        // (e.g. F´ CfdpManager SendFile needs channelId/destId/cfdpClass/
+        // keep/priority beyond the two path arguments).
+        spec.addOption("downlinkCommandArgs", OptionType.ANY);
         spec.addOption("downloadTimeoutMs", OptionType.INTEGER).withDefault(30000);
         return spec;
     }
@@ -180,6 +192,8 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         this.fileDownlinkCommandName = config.getString("fileDownlinkCommand", "");
         this.sourceFileNameArg = config.getString("sourceFileNameArg", "sourceFileName");
         this.destFileNameArg = config.getString("destFileNameArg", "destFileName");
+        this.downlinkCommandArgs = config.containsKey("downlinkCommandArgs")
+                ? config.getMap("downlinkCommandArgs") : Map.of();
         this.downloadTimeoutMs = config.getLong("downloadTimeoutMs", 30000L);
         if (cfdpApid < 0 || cfdpApid > SpacePacket.MAX_APID) {
             throw new InitException("cfdpApid " + cfdpApid + " outside [0, "
@@ -326,8 +340,22 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
         }
         byte[] bytes = extractCfdpPacket((byte[]) packetCol, cfdpApid);
         if (bytes != null) {
-            downlinkHandler.handlePdu(bytes, SpacePacket.PRIMARY_HEADER_LEN);
+            downlinkHandler.handlePdu(bytes, pduOffset(bytes));
         }
+    }
+
+    /**
+     * Locate the PDU within a CFDP space packet, skipping the F´
+     * {@code FW_PACKET_FILE} descriptor CfdpManager prepends. Raw PDUs
+     * (first byte 0x2X, CFDP version 001) are accepted as well.
+     */
+    static int pduOffset(byte[] bytes) {
+        int off = SpacePacket.PRIMARY_HEADER_LEN;
+        if (bytes.length - off >= FilePacket.DESCRIPTOR_LEN
+                && FilePacket.isFilePacket(bytes, off)) {
+            return off + FilePacket.DESCRIPTOR_LEN;
+        }
+        return off;
     }
 
     /**
@@ -399,7 +427,7 @@ public class CfdpFileTransferService extends AbstractFprimeFileTransferService
                 "No CFDP downlink command configured; "
                         + "only unsolicited (spacecraft initiated) downlinks are supported",
                 TRANSFER_TYPE, sourcePath, destBucket, destPath,
-                sourceFileNameArg, destFileNameArg, "Metadata PDU");
+                sourceFileNameArg, destFileNameArg, downlinkCommandArgs, "Metadata PDU");
     }
 
     @Override
