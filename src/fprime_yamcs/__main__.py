@@ -108,6 +108,13 @@ class YamcsParser(ParserBase):
                 "type": int,
                 "help": "Specify the UDP port for downlink (TM) communication with YAMCS. Default: %(default)s",
             },
+            ("--udp-tm-inject-port", ): {
+                "action": "store",
+                "default": 50002,
+                "type": int,
+                "help": "Specify the UDP port for re-injecting split telemetry channel packets into YAMCS. "
+                        "Default: %(default)s",
+            },
         }
 
     def handle_arguments(self, args, **kwargs):
@@ -260,7 +267,7 @@ def get_packet_ids(dictionary: Path, channel_patterns: List[str]) -> List[int]:
     return sorted(packet_ids)
 
 
-def construct_temporary_configuration(config_directory: Path, instances: List[str], dictionary: Path, uplink_port: int, downlink_port: int, realtime_only_channels: List[str]) -> Tuple[Path, str]:
+def construct_temporary_configuration(config_directory: Path, instances: List[str], dictionary: Path, uplink_port: int, downlink_port: int, tm_inject_port: int, realtime_only_channels: List[str]) -> Tuple[Path, str]:
     """ Construct a temporary YAMCS configuration directory
 
     The YAMCS configuration that ships with fprime-yamcs needs to be modified in several specific ways before running
@@ -276,6 +283,7 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
         dictionary: The path to the F Prime dictionary file to convert and use for the XTCE MDB
         uplink_port: The UDP port to use for uplink (TC) communication with YAMCS
         downlink_port: The UDP port to use for downlink (TM) communication with YAMCS
+        tm_inject_port: The UDP port to use for re-injecting split telemetry channel packets
         realtime_only_channels: Telemetry channel name patterns to keep realtime-only (not archived)
     Returns:
         The path to the temporary YAMCS configuration directory and the fprime identified instance
@@ -316,6 +324,13 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
                     vc.setdefault("packetPreprocessorArgs", {})["doNotArchiveChannelIds"] = realtime_only_ids
                 if realtime_only_packet_ids:
                     vc.setdefault("packetPreprocessorArgs", {})["doNotArchivePacketIds"] = realtime_only_packet_ids
+        elif link.get("class", "") == "org.yamcs.tctm.UdpTmDataLink":
+            print(f"[INFO] Setting split telemetry injection port for TM link {link.get('name', '')} to {tm_inject_port}")
+            link["port"] = tm_inject_port
+            if realtime_only_ids:
+                link.setdefault("packetPreprocessorArgs", {})["doNotArchiveChannelIds"] = realtime_only_ids
+            if realtime_only_packet_ids:
+                link.setdefault("packetPreprocessorArgs", {})["doNotArchivePacketIds"] = realtime_only_packet_ids
         elif link.get("class", "") == "org.yamcs.tctm.ccsds.UdpTcFrameLink":
             print(f"[INFO] Setting downlink port for TM link {link.get('name', '')} to {downlink_port}")
             link["port"] = uplink_port
@@ -394,6 +409,7 @@ def launch_yamcs(parsed_args):
     environment = os.environ.copy()
     environment["FPRIME_DICTIONARY"] = parsed_args.dictionary
     environment["FPRIME_YAMCS_INSTANCE"] = parsed_args.yamcs_events_instance
+    environment["FPRIME_YAMCS_TM_INJECT_PORT"] = str(parsed_args.udp_tm_inject_port)
 
     print(f"[INFO] Using FPRIME_DICTIONARY: {environment['FPRIME_DICTIONARY']}")
     print(f"[INFO] Using FPRIME_YAMCS_INSTANCE: {environment['FPRIME_YAMCS_INSTANCE']}")
@@ -450,7 +466,7 @@ def main():
         if not instances:
             raise Exception(f"No YAMCS instances found in {parsed_args.yamcs_config_dir / 'etc/yamcs.yaml'}")
 
-        yamcs_config_dir, fprime_instance = construct_temporary_configuration(parsed_args.yamcs_config_dir, instances, parsed_args.dictionary, parsed_args.udp_uplink_port, parsed_args.udp_downlink_port, parsed_args.yamcs_realtime_only_channels)
+        yamcs_config_dir, fprime_instance = construct_temporary_configuration(parsed_args.yamcs_config_dir, instances, parsed_args.dictionary, parsed_args.udp_uplink_port, parsed_args.udp_downlink_port, parsed_args.udp_tm_inject_port, parsed_args.yamcs_realtime_only_channels)
         parsed_args.yamcs_config_dir = yamcs_config_dir
         if parsed_args.yamcs_events_instance is None:
             parsed_args.yamcs_events_instance = fprime_instance
