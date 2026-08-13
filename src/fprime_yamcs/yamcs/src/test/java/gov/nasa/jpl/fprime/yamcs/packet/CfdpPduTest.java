@@ -53,6 +53,36 @@ public class CfdpPduTest {
     }
 
     @Test
+    public void oneByteSequenceNumberAccepted() {
+        // F´ CfdpManager encodes 1-byte entity ids AND a 1-byte sequence
+        // number; rewrite an encoded EOF into that layout (header shrinks by 1).
+        byte[] pdu = CfdpPdu.encodeEof(1, 2, 9, CfdpPdu.CONDITION_NO_ERROR, 0xCAFEBABE, 500);
+        byte[] narrow = new byte[pdu.length - 1];
+        System.arraycopy(pdu, 0, narrow, 0, 4);
+        narrow[3] = 0x00;          // 1-byte ids, 1-byte seq
+        narrow[4] = pdu[4];        // src
+        narrow[5] = 9;             // seq (1 byte)
+        narrow[6] = pdu[7];        // dst
+        System.arraycopy(pdu, 8, narrow, 7, pdu.length - 8);
+
+        CfdpPdu.Header h = CfdpPdu.decodeHeader(narrow, 0);
+        assertEquals(1, h.sourceEntityId);
+        assertEquals(2, h.destinationEntityId);
+        assertEquals(9, h.transactionSeq);
+        assertEquals(7, h.dataOffset);
+        CfdpPdu.Eof eof = CfdpPdu.decodeEof(narrow, h);
+        assertEquals(0xCAFEBABE, eof.checksum);
+        assertEquals(500, eof.fileSize);
+    }
+
+    @Test
+    public void oversizedFieldLengthsRejected() {
+        byte[] pdu = CfdpPdu.encodeEof(1, 2, 9, CfdpPdu.CONDITION_NO_ERROR, 0, 0);
+        pdu[3] = 0x77; // 8-byte entity ids and sequence number
+        assertThrows(IllegalArgumentException.class, () -> CfdpPdu.decodeHeader(pdu, 0));
+    }
+
+    @Test
     public void eofCancelConditionCode() {
         byte[] pdu = CfdpPdu.encodeEof(1, 2, 9, CfdpPdu.CONDITION_CANCEL_REQUEST, 0, 0);
         CfdpPdu.Header h = CfdpPdu.decodeHeader(pdu, 0);

@@ -6,9 +6,10 @@ import java.nio.charset.StandardCharsets;
 /**
  * Codec for CCSDS File Delivery Protocol PDUs (CCSDS 727.0-B), restricted to
  * the class-1 (unacknowledged) subset needed for F´ file transfer: Metadata,
- * File Data, and EOF PDUs, with small (32-bit) file sizes, one-byte entity
- * ids, two-byte transaction sequence numbers, and the modular checksum
- * ({@link CfdpChecksum}).
+ * File Data, and EOF PDUs, with small (32-bit) file sizes and the modular
+ * checksum ({@link CfdpChecksum}). Encoding uses one-byte entity ids and
+ * two-byte transaction sequence numbers; decoding accepts any id/sequence
+ * width up to four bytes (F´ CfdpManager transmits one-byte sequences).
  *
  * <p>All multi-byte fields are big-endian. Decoders validate every read
  * against the buffer length and throw {@link IllegalArgumentException} on
@@ -106,18 +107,17 @@ public final class CfdpPdu {
     // Decoding
     // ------------------------------------------------------------------
 
-    /** Minimum length of a PDU this codec can decode. */
+    /** Minimum length of a PDU this codec can decode (1-byte ids and seq). */
     public static int minimumLength() {
-        return HEADER_LEN + 1;
+        return 4 + 3 + 1;
     }
 
     /**
-     * Decode the fixed PDU header at {@code offset}. Only 1-byte entity ids
-     * and 2-byte transaction sequence numbers are accepted (the sizes this
-     * codec encodes).
+     * Decode the PDU header at {@code offset}. Entity ids and transaction
+     * sequence numbers of one to four bytes are accepted.
      */
     public static Header decodeHeader(byte[] bytes, int offset) {
-        require(bytes.length - offset >= HEADER_LEN, "PDU too short for header");
+        require(bytes.length - offset >= 4, "PDU too short for header");
         int b0 = bytes[offset] & 0xFF;
         int version = (b0 >> 5) & 0x07;
         require(version == 0b001, "unsupported CFDP version " + version);
@@ -132,15 +132,26 @@ public final class CfdpPdu {
         int b3 = bytes[offset + 3] & 0xFF;
         int entityIdLen = ((b3 >> 4) & 0x07) + 1;
         int seqLen = (b3 & 0x07) + 1;
-        require(entityIdLen == 1 && seqLen == 2,
+        require(entityIdLen <= 4 && seqLen <= 4,
                 "unsupported entity id/sequence lengths " + entityIdLen + "/" + seqLen);
-        int src = bytes[offset + 4] & 0xFF;
-        int seq = ByteBuffer.wrap(bytes).getShort(offset + 5) & 0xFFFF;
-        int dst = bytes[offset + 7] & 0xFF;
-        require(bytes.length - offset - HEADER_LEN >= dataFieldLength,
+        int headerLen = 4 + entityIdLen + seqLen + entityIdLen;
+        require(bytes.length - offset >= headerLen, "PDU too short for header");
+        int src = readUnsigned(bytes, offset + 4, entityIdLen);
+        int seq = readUnsigned(bytes, offset + 4 + entityIdLen, seqLen);
+        int dst = readUnsigned(bytes, offset + 4 + entityIdLen + seqLen, entityIdLen);
+        require(bytes.length - offset - headerLen >= dataFieldLength,
                 "PDU shorter than its data field length");
         return new Header(type, towardSender, acknowledged, dataFieldLength,
-                src, seq, dst, offset + HEADER_LEN);
+                src, seq, dst, offset + headerLen);
+    }
+
+    /** Read a big-endian unsigned integer of {@code len} (1-4) bytes. */
+    private static int readUnsigned(byte[] bytes, int offset, int len) {
+        int value = 0;
+        for (int i = 0; i < len; i++) {
+            value = (value << 8) | (bytes[offset + i] & 0xFF);
+        }
+        return value;
     }
 
     /** Read the directive code of a FILE_DIRECTIVE PDU. */
