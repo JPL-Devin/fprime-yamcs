@@ -1,7 +1,9 @@
 package gov.nasa.jpl.fprime.yamcs.tctm;
 
 import java.nio.ByteBuffer;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -41,6 +43,7 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
     private static final int FwTimeBaseStoreType_SIZE = 2;
     private static final int FwTimeContextStoreType_SIZE = 1;
     private static final int FwEventIdType_SIZE = 4;
+    private static final int FwChanIdType_SIZE = 4;
 
     private static final int TLM_TIME_TAG_OFFSET = SpacePacket.PRIMARY_HEADER_LEN
             + FwPacketDescriptorType_SIZE + FwTlmPacketizeIdType_SIZE
@@ -50,13 +53,33 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
             + FwPacketDescriptorType_SIZE + FwEventIdType_SIZE
             + FwTimeBaseStoreType_SIZE + FwTimeContextStoreType_SIZE;
 
+    private static final int CHAN_ID_OFFSET = SpacePacket.PRIMARY_HEADER_LEN
+            + FwPacketDescriptorType_SIZE;
+
+    private static final int PKT_ID_OFFSET = SpacePacket.PRIMARY_HEADER_LEN
+            + FwPacketDescriptorType_SIZE;
+
+    private static final int CHAN_TIME_TAG_OFFSET = SpacePacket.PRIMARY_HEADER_LEN
+            + FwPacketDescriptorType_SIZE + FwChanIdType_SIZE
+            + FwTimeBaseStoreType_SIZE + FwTimeContextStoreType_SIZE;
+
     // Default F´ ComCfg APID assignments; configurable for deployments
     // with re-mapped APIDs.
+    private static final int DEFAULT_APID_TLM_CHAN = 1;
     private static final int DEFAULT_APID_EVENT = 2;
     private static final int DEFAULT_APID_TLM_PKT = 4;
 
     private final int eventApid;
     private final int tlmPktApid;
+    private final int tlmChanApid;
+
+    // Telemetry channel ids whose packets are marked "do not archive": they remain
+    // available on the realtime processor but are skipped by the XtceTmRecorder and
+    // thus never reach the tm table nor the (backfilled) parameter archive.
+    private final Set<Long> doNotArchiveChannelIds = new HashSet<>();
+
+    // Packetized-telemetry (Svc.TlmPacketizer) packet ids treated the same way.
+    private final Set<Integer> doNotArchivePacketIds = new HashSet<>();
 
     // Impossible 14-bit sequence value marking a freshly seeded counter.
     private static final int FIRST_PACKET_SENTINEL = -1;
@@ -72,6 +95,17 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
         super(yamcsInstance, config);
         this.eventApid = config.getInt("eventApid", DEFAULT_APID_EVENT);
         this.tlmPktApid = config.getInt("tlmPktApid", DEFAULT_APID_TLM_PKT);
+        this.tlmChanApid = config.getInt("tlmChanApid", DEFAULT_APID_TLM_CHAN);
+        if (config.containsKey("doNotArchiveChannelIds")) {
+            for (Object id : config.getList("doNotArchiveChannelIds")) {
+                doNotArchiveChannelIds.add(((Number) id).longValue());
+            }
+        }
+        if (config.containsKey("doNotArchivePacketIds")) {
+            for (Object id : config.getList("doNotArchivePacketIds")) {
+                doNotArchivePacketIds.add(((Number) id).intValue());
+            }
+        }
     }
 
     @Override
@@ -110,6 +144,20 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
             timeTagOffset = EVENT_TIME_TAG_OFFSET;
         } else if (apid == tlmPktApid) {
             timeTagOffset = TLM_TIME_TAG_OFFSET;
+            if (!doNotArchivePacketIds.isEmpty() && bytes.length >= PKT_ID_OFFSET + FwTlmPacketizeIdType_SIZE) {
+                int packetId = ByteBuffer.wrap(bytes).getShort(PKT_ID_OFFSET) & 0xFFFF;
+                if (doNotArchivePacketIds.contains(packetId)) {
+                    packet.setDoNotArchive();
+                }
+            }
+        } else if (apid == tlmChanApid) {
+            timeTagOffset = CHAN_TIME_TAG_OFFSET;
+            if (!doNotArchiveChannelIds.isEmpty() && bytes.length >= CHAN_ID_OFFSET + FwChanIdType_SIZE) {
+                long channelId = ByteBuffer.wrap(bytes).getInt(CHAN_ID_OFFSET) & 0xFFFFFFFFL;
+                if (doNotArchiveChannelIds.contains(channelId)) {
+                    packet.setDoNotArchive();
+                }
+            }
         }
         if (timeTagOffset >= 0 && bytes.length >= timeTagOffset + 8) {
             ByteBuffer bb = ByteBuffer.wrap(bytes);
