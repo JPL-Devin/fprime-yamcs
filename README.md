@@ -88,6 +88,7 @@ services:
       kemApid: 0x20                         # APID of the KEM ciphertext packet
       epApid: 0x21                          # APID of the SDLS EP PDU packets
       uplinkLink: UDP_TC_OUT.vc1            # TC link handling the uplink
+      kemFragmentSize: 512                  # ciphertext bytes per KEM packet (fit TC frame limit)
       masterKeyId: 1                        # key ID reported for the KEM-derived KEK
       firstSessionKeyId: 128                # session key IDs count up from here
       opensslBinary: openssl                # OpenSSL >= 3.5
@@ -97,6 +98,8 @@ services:
 ```
 
 A minimal operator UI is served at `http://<yamcs>/keymgmt/` with an "Uplink New Key" button, key inventory, and lifecycle states. The HTTP API endpoints are `POST /keymgmt/api/rekey`, `GET /keymgmt/api/inventory`, and `GET /keymgmt/api/status` (all require the `ControlLinks` system privilege).
+
+The ML-KEM-768 ciphertext (1088 bytes) exceeds the default 1024-byte TC frame limit, so it is fragmented across KEM Establishment packets: `version(1) | masterKeyId(2) | fragIndex(1) | fragCount(1) | fragment`. The recipient concatenates fragments 0..fragCount-1 to recover the ciphertext.
 
 The flight-side counterpart (KEM decapsulation and EP PDU processing in F´) is under development; until it can emit Key Verification replies, keys report as "unverified".
 

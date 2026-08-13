@@ -35,8 +35,9 @@ import org.yamcs.tctm.ccsds.TcPacketHandler;
  * <ol>
  *   <li>ML-KEM-768 encapsulation against the pre-loaded spacecraft public
  *       key; the shared secret becomes the transaction master key (KEK)
- *   <li>KEM Establishment space packet on {@code kemApid} carrying the
- *       ciphertext, so the spacecraft can decapsulate the same KEK
+ *   <li>KEM Establishment space packets on {@code kemApid} carrying the
+ *       (fragmented) ciphertext, so the spacecraft can decapsulate the
+ *       same KEK
  *   <li>OTAR Command PDU (355.1-B-1 Annex D baseline mode) on
  *       {@code epApid} carrying a fresh AES-256 session key wrapped with
  *       AES-256-GCM under the KEK
@@ -60,9 +61,6 @@ import org.yamcs.tctm.ccsds.TcPacketHandler;
  */
 public class KeyManagementService extends AbstractYamcsService {
 
-    /** Wire format version of the KEM Establishment packet payload. */
-    static final byte KEM_PACKET_VERSION = 1;
-
     private static final SecureRandom RANDOM = new SecureRandom();
 
     // Configuration
@@ -70,9 +68,11 @@ public class KeyManagementService extends AbstractYamcsService {
     private int kemApid;
     private int epApid;
     private String uplinkLinkName;
+    private int kemFragmentSize;
     private int masterKeyId;
     private int firstSessionKeyId;
     private String opensslBinary;
+    private int sdlsInstallDelayMs;
     private List<SdlsTarget> sdlsTargets;
 
     // Runtime
@@ -122,10 +122,15 @@ public class KeyManagementService extends AbstractYamcsService {
         spec.addOption("kemApid", OptionType.INTEGER).withDefault(0x20);
         spec.addOption("epApid", OptionType.INTEGER).withDefault(0x21);
         spec.addOption("uplinkLink", OptionType.STRING).withDefault("UDP_TC_OUT.vc1");
+        // KEM ciphertext bytes per packet; each packet must fit the TC frame limit
+        spec.addOption("kemFragmentSize", OptionType.INTEGER).withDefault(512);
         spec.addOption("masterKeyId", OptionType.INTEGER).withDefault(1);
         // Annex D reserves session key IDs 0-127 for master keys
         spec.addOption("firstSessionKeyId", OptionType.INTEGER).withDefault(128);
         spec.addOption("opensslBinary", OptionType.STRING).withDefault("openssl");
+        // Wait for queued rekey packets to be framed under the OLD key before
+        // installing the new one into the ground SAs
+        spec.addOption("sdlsInstallDelayMs", OptionType.INTEGER).withDefault(500);
         spec.addOption("sdlsTargets", OptionType.LIST).withElementType(OptionType.MAP)
                 .withSpec(targetSpec).withDefault(List.of());
         return spec;
@@ -138,9 +143,11 @@ public class KeyManagementService extends AbstractYamcsService {
         kemApid = config.getInt("kemApid", 0x20);
         epApid = config.getInt("epApid", 0x21);
         uplinkLinkName = config.getString("uplinkLink", "UDP_TC_OUT.vc1");
+        kemFragmentSize = config.getInt("kemFragmentSize", 512);
         masterKeyId = config.getInt("masterKeyId", 1);
         firstSessionKeyId = config.getInt("firstSessionKeyId", 128);
         opensslBinary = config.getString("opensslBinary", "openssl");
+        sdlsInstallDelayMs = config.getInt("sdlsInstallDelayMs", 500);
         nextSessionKeyId.set(firstSessionKeyId);
 
         sdlsTargets = new ArrayList<>();
@@ -203,7 +210,10 @@ public class KeyManagementService extends AbstractYamcsService {
         try {
             // 1. Establish transaction KEK via ML-KEM-768
             encapsulation = mlkem.encapsulate(publicKeyFile);
-            sendPacket(kemApid, buildKemPayload(encapsulation.getCiphertext()));
+            for (byte[] fragment : KemPacketBuilder.buildFragments(masterKeyId,
+                    encapsulation.getCiphertext(), kemFragmentSize)) {
+                sendPacket(kemApid, fragment);
+            }
 
             // 2. OTAR: upload fresh session key under the KEK
             RANDOM.nextBytes(sessionKey);
@@ -220,7 +230,12 @@ public class KeyManagementService extends AbstractYamcsService {
             byte[] challenge = new byte[EpPduBuilder.CHALLENGE_LENGTH];
             sendPacket(epApid, EpPduBuilder.buildKeyVerification(sessionKeyId, challenge));
 
-            // 5. Install into ground SDLS so both ends use the new key
+            // 5. Install into ground SDLS so both ends use the new key.
+            // Let the queued rekey packets drain first: they must be framed
+            // under the old key, which the spacecraft still holds.
+            if (!sdlsTargets.isEmpty() && sdlsInstallDelayMs > 0) {
+                Thread.sleep(sdlsInstallDelayMs);
+            }
             LinkManager linkManager = YamcsServer.getServer().getInstance(yamcsInstance).getLinkManager();
             for (SdlsTarget target : sdlsTargets) {
                 SdlsSecurityAssociation sa = resolveSa(linkManager, target);
@@ -254,15 +269,6 @@ public class KeyManagementService extends AbstractYamcsService {
 
     public RekeyStatus getLastStatus() {
         return lastStatus;
-    }
-
-    /** KEM Establishment packet payload: version | master key ID | ciphertext. */
-    private byte[] buildKemPayload(byte[] ciphertext) {
-        ByteBuffer bb = ByteBuffer.allocate(3 + ciphertext.length);
-        bb.put(KEM_PACKET_VERSION);
-        bb.putShort((short) masterKeyId);
-        bb.put(ciphertext);
-        return bb.array();
     }
 
     private static SdlsSecurityAssociation resolveSa(LinkManager linkManager, SdlsTarget target) {

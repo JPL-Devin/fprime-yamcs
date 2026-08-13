@@ -33,6 +33,18 @@ services:
   # FPRIME_DOWNLINK_DIR - Directory to mirror downloaded files
   # Set by: export FPRIME_DOWNLINK_DIR=/custom/downlink/path
 
+  # Optional SDLS key management (ML-KEM-768 + CCSDS 355.1-B-1 OTAR).
+  # Requires OpenSSL >= 3.5 and a pre-loaded spacecraft ML-KEM-768 public key.
+  # See the "SDLS Key Management" section of the README.
+  # - class: gov.jpl.nasa.fprime.keymgmt.KeyManagementService
+  #   args:
+  #     publicKeyFile: etc/mlkem768-pub.pem
+  #     uplinkLink: UDP_TC_OUT.vc1
+  #     opensslBinary: openssl
+  #     sdlsTargets:
+  #       - link: UDP_TC_OUT
+  #         spi: 1
+
   - class: com.example.myproject.FprimeFilePacketService
     args:
       inStream: tm_realtime
