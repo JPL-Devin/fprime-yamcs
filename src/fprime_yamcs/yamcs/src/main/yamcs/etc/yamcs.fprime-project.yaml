@@ -54,23 +54,30 @@ services:
       # locations like /tmp can be symlink-attacked before service start.
       downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:}
 
-  # Class-1 (unacknowledged) CFDP file transfer. Enable when the flight
-  # software carries CFDP PDUs in space packets on a dedicated APID. The
-  # uplinkLink may be a TC frame virtual channel (as below) or a raw
-  # space-packet link such as org.yamcs.tctm.UdpTcDataLink. If a raw link is
-  # used, attach it to a dedicated tc stream (e.g. tc_cfdp declared under
-  # streamConfig) — a second link on tc_realtime would steal MDB commands
-  # from the primary TC link.
-  #- class: gov.nasa.jpl.fprime.yamcs.filetransfer.CfdpFileTransferService
+  # CFDP file transfer using YAMCS's built-in CFDP implementation. Enable when
+  # the flight software carries CFDP PDUs in space packets on a dedicated APID.
+  # The bridge unwraps/wraps the space packets and shuttles raw PDUs to/from
+  # the cfdp_in/cfdp_out streams; it must be listed before the CFDP service
+  # because it creates those streams.
+  #- class: gov.nasa.jpl.fprime.yamcs.filetransfer.CfdpSpacePacketBridge
   #  args:
-  #    inStream: tm_realtime
-  #    bucket: cfdpFiles
+  #    tmStream: tm_realtime
   #    cfdpApid: 16   # pick an APID unused by your deployment's ComCfg assignments
-  #    localEntityId: 1
-  #    remoteEntityId: 2
   #    uplinkLink: UDP_TC_OUT.vc1
-  #    uplinkChunkSize: ${FPRIME_UPLINK_CHUNK_SIZE:512}
-  #    downlinkMirrorDir: ${FPRIME_DOWNLINK_DIR:}
+  #- class: gov.nasa.jpl.fprime.yamcs.filetransfer.FprimeCfdpService
+  #  args:
+  #    incomingBucket: cfdpFiles
+  #    entityIdLength: 1     # F´ CfdpManager uses one-byte ids and sequences
+  #    sequenceNrLength: 1
+  #    localEntities:
+  #      - name: ground
+  #        id: 1
+  #    remoteEntities:
+  #      - name: spacecraft
+  #        id: 2
+  #    # F´ command used to request a downlink; leave empty to allow only
+  #    # spacecraft-initiated transfers.
+  #    fileDownlinkCommand: ""
 
 dataLinks:
   - name: UDP_TM_IN

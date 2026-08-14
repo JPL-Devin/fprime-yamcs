@@ -21,34 +21,11 @@ public class ServiceApiValidationTest {
 
     private static final int MAX = 64;
 
-    private static CfdpFileTransferService cfdpService() throws InitException {
-        CfdpFileTransferService svc = new CfdpFileTransferService();
-        svc.init("test", "CfdpFileTransferService",
-                YConfiguration.wrap(Map.of("maxFileSize", MAX)));
-        return svc;
-    }
-
     private static FprimeFilePacketService filePacketService() throws InitException {
         FprimeFilePacketService svc = new FprimeFilePacketService();
         svc.init("test", "FprimeFilePacketService",
                 YConfiguration.wrap(Map.of("maxFileSize", MAX)));
         return svc;
-    }
-
-    @Test
-    public void cfdpStartUploadRejectsBadArguments() throws Exception {
-        CfdpFileTransferService svc = cfdpService();
-        FakeBucket bucket = new FakeBucket();
-        bucket.objects.put("big.bin", new byte[MAX + 1]);
-
-        assertThrows(InvalidRequestException.class,
-                () -> svc.startUpload("l", null, "a.bin", "r", "/a", null));
-        assertThrows(InvalidRequestException.class,
-                () -> svc.startUpload("l", bucket, "", "r", "/a", null));
-        assertThrows(InvalidRequestException.class,
-                () -> svc.startUpload("l", bucket, "missing.bin", "r", "/a", null));
-        assertThrows(InvalidRequestException.class,
-                () -> svc.startUpload("l", bucket, "big.bin", "r", "/a", null));
     }
 
     @Test
