@@ -146,8 +146,7 @@ public class FprimeCfdpService extends CfdpService {
             t.setDaemon(true);
             return t;
         });
-        this.listingHandler = new RemoteFileListingHandler(
-                AbstractFprimeFileTransferService.REMOTE_ENTITY_NAME, monitorNotifier);
+        this.listingHandler = new RemoteFileListingHandler(monitorNotifier);
     }
 
     @Override
@@ -259,7 +258,7 @@ public class FprimeCfdpService extends CfdpService {
         }
         String dirName = normalizeDirName(remotePath);
         log.info("fetchFileList: requesting F´ listing of {}", dirName);
-        listingHandler.beginListing(dirName);
+        listingHandler.beginListing(dirName, remoteEntity, requestedPath(remotePath));
         try {
             Map<String, Object> args = new HashMap<>();
             args.put(listDirDirNameArg, dirName);
@@ -275,7 +274,7 @@ public class FprimeCfdpService extends CfdpService {
     @Override
     public ListFilesResponse getFileList(String localEntity, String remoteEntity,
                                          String remotePath, Map<String, Object> options) {
-        return listingHandler.getFileList(normalizeDirName(remotePath));
+        return listingHandler.getFileList(requestedPath(remotePath));
     }
 
     @Override
@@ -311,6 +310,11 @@ public class FprimeCfdpService extends CfdpService {
 
     private static String normalizeDirName(String remotePath) {
         return (remotePath == null || remotePath.isEmpty()) ? "." : remotePath;
+    }
+
+    /** The caller's path, echoed verbatim so yamcs-web can match pushed listings. */
+    private static String requestedPath(String remotePath) {
+        return remotePath == null ? "" : remotePath;
     }
 
     // ------------------------------------------------------------------

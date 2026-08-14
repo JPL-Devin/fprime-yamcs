@@ -479,7 +479,7 @@ public class FprimeFilePacketService extends AbstractFprimeFileTransferService
         }
         String dirName = normalizeDirName(remotePath);
         log.info("fetchFileList: requesting F´ listing of {}", dirName);
-        listingHandler.beginListing(dirName);
+        listingHandler.beginListing(dirName, remoteEntity, requestedPath(remotePath));
         try {
             Map<String, Object> args = new HashMap<>();
             args.put(listDirDirNameArg, dirName);

@@ -21,7 +21,7 @@ import org.yamcs.yarch.protobuf.Db.Event;
 
 public class RemoteFileListingHandlerTest {
 
-    private final RemoteFileListingHandler handler = new RemoteFileListingHandler("fprime", Runnable::run);
+    private final RemoteFileListingHandler handler = new RemoteFileListingHandler(Runnable::run);
 
     private static Tuple eventTuple(Event evt) {
         TupleDefinition tdef = new TupleDefinition();
@@ -45,17 +45,17 @@ public class RemoteFileListingHandlerTest {
     @Test
     public void inProgressListingCountIsBounded() {
         for (int i = 0; i < RemoteFileListingHandler.MAX_CACHED_LISTINGS; i++) {
-            handler.beginListing("/dir" + i);
+            handler.beginListing("/dir" + i, "fprime", "/dir" + i);
         }
         assertThrows(InvalidRequestException.class,
-                () -> handler.beginListing("/overflow"));
+                () -> handler.beginListing("/overflow", "fprime", "/overflow"));
         // Refreshing an already-in-progress path is still allowed at the cap.
-        handler.beginListing("/dir0");
+        handler.beginListing("/dir0", "fprime", "/dir0");
     }
 
     @Test
     public void listingAccumulatesAndCompletes() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         feedStructured("DirectoryListing",
                 Map.of("dirName", "/data", "fileName", "a.bin", "fileSize", "100"));
         feedStructured("DirectoryListingSubdir",
@@ -72,8 +72,20 @@ public class RemoteFileListingHandlerTest {
     }
 
     @Test
+    public void listingEchoesDestinationAndRequestedPath() {
+        // yamcs-web only applies pushed listings whose destination/remotePath
+        // match its dialog selection; root folder is requested as "".
+        handler.beginListing(".", "fprime", "");
+        feedStructured("ListDirectorySucceeded", Map.of("dirName", "."));
+
+        ListFilesResponse listing = handler.getFileList("");
+        assertEquals("fprime", listing.getDestination());
+        assertEquals("", listing.getRemotePath());
+    }
+
+    @Test
     public void fileNamesWithSpacesParse() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         feedStructured("DirectoryListing",
                 Map.of("dirName", "/data", "fileName", "my file.bin", "fileSize", "5"));
         feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
@@ -82,7 +94,7 @@ public class RemoteFileListingHandlerTest {
 
     @Test
     public void eventsWithoutExtraIgnored() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         Event evt = Event.newBuilder()
                 .setSource("test")
                 .setSeqNumber(0)
@@ -98,14 +110,14 @@ public class RemoteFileListingHandlerTest {
 
     @Test
     public void errorTerminalFailsListing() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         feedStructured("ListDirectoryError", Map.of("dirName", "/data", "status", "1"));
         assertEquals("failed", handler.getFileList("/data").getState());
     }
 
     @Test
     public void errorTerminalMatchesDirectoryNameWithSpaces() {
-        handler.beginListing("/my data dir");
+        handler.beginListing("/my data dir", "fprime", "/my data dir");
         feedStructured("ListDirectoryError", Map.of("dirName", "/my data dir", "status", "1"));
         assertEquals("failed", handler.getFileList("/my data dir").getState());
     }
@@ -114,7 +126,7 @@ public class RemoteFileListingHandlerTest {
     public void cachedListingsAreBoundedLru() {
         for (int i = 0; i <= RemoteFileListingHandler.MAX_CACHED_LISTINGS; i++) {
             String dir = "/dir" + i;
-            handler.beginListing(dir);
+            handler.beginListing(dir, "fprime", dir);
             feedStructured("ListDirectorySucceeded", Map.of("dirName", dir));
         }
         assertNull(handler.getFileList("/dir0"), "oldest cached listing must be evicted");
@@ -124,7 +136,7 @@ public class RemoteFileListingHandlerTest {
 
     @Test
     public void entriesForUnknownDirectoryIgnored() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         feedStructured("DirectoryListing",
                 Map.of("dirName", "/other", "fileName", "a.bin", "fileSize", "1"));
         feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
@@ -134,7 +146,7 @@ public class RemoteFileListingHandlerTest {
 
     @Test
     public void incompleteExtraArgsIgnored() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         feedStructured("DirectoryListing", Map.of("dirName", "/data"));
         feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
         assertEquals(0, handler.getFileList("/data").getFilesCount());
@@ -150,7 +162,7 @@ public class RemoteFileListingHandlerTest {
         handler.registerMonitor(bad);
         handler.registerMonitor(good);
 
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
         assertEquals(1, seen.size());
 
@@ -161,14 +173,14 @@ public class RemoteFileListingHandlerTest {
 
     @Test
     public void failListingFlipsInProgressListing() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         handler.failListing("/data");
         assertEquals("failed", handler.getFileList("/data").getState());
     }
 
     @Test
     public void staleListingExpiresAsFailed() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         handler.expireStaleListings(System.currentTimeMillis()
                 + RemoteFileListingHandler.LISTING_EXPIRY_MS + 1);
         assertEquals("failed", handler.getFileList("/data").getState());
@@ -176,7 +188,7 @@ public class RemoteFileListingHandlerTest {
 
     @Test
     public void freshListingSurvivesExpirySweep() {
-        handler.beginListing("/data");
+        handler.beginListing("/data", "fprime", "/data");
         handler.expireStaleListings();
         assertNull(handler.getFileList("/data"), "listing still in progress");
         feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));

@@ -134,7 +134,7 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     protected User systemUser;
 
     protected final RemoteFileListingHandler listingHandler =
-            new RemoteFileListingHandler(REMOTE_ENTITY_NAME, monitorNotifier);
+            new RemoteFileListingHandler(monitorNotifier);
 
     // ------------------------------------------------------------------
     // Transfer bookkeeping
@@ -721,19 +721,11 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
     @Override
     public ListFilesResponse getFileList(String localEntity, String remoteEntity,
                                          String remotePath, Map<String, Object> options) {
-        return listingHandler.getFileList(normalizeDirName(remotePath));
+        return listingHandler.getFileList(requestedPath(remotePath));
     }
 
     @Override
     public void saveFileList(ListFilesResponse listing) {
-        // Normalize the cache key the same way getFileList does, so a
-        // listing saved for "" is found again when queried as ".".
-        if (listing != null
-                && !listing.getRemotePath().equals(normalizeDirName(listing.getRemotePath()))) {
-            listing = listing.toBuilder()
-                    .setRemotePath(normalizeDirName(listing.getRemotePath()))
-                    .build();
-        }
         listingHandler.saveFileList(listing);
     }
 
@@ -759,5 +751,10 @@ public abstract class AbstractFprimeFileTransferService extends AbstractFileTran
 
     protected static String normalizeDirName(String remotePath) {
         return (remotePath == null || remotePath.isEmpty()) ? "." : remotePath;
+    }
+
+    /** The caller's path, echoed verbatim so yamcs-web can match pushed listings. */
+    protected static String requestedPath(String remotePath) {
+        return remotePath == null ? "" : remotePath;
     }
 }

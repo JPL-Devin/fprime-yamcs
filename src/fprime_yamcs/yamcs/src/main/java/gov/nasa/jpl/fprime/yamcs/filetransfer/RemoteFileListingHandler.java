@@ -62,7 +62,6 @@ public class RemoteFileListingHandler implements StreamSubscriber {
      */
     static final int MAX_CACHED_LISTINGS = 64;
 
-    private final String remoteEntityName;
     // Listing-monitor callbacks are dispatched here rather than on the
     // events-stream subscriber thread, so a slow monitor cannot stall
     // event processing (same pattern as transfer-monitor notification).
@@ -78,8 +77,7 @@ public class RemoteFileListingHandler implements StreamSubscriber {
             });
     private final Set<RemoteFileListMonitor> monitors = new CopyOnWriteArraySet<>();
 
-    public RemoteFileListingHandler(String remoteEntityName, Executor monitorNotifier) {
-        this.remoteEntityName = remoteEntityName;
+    public RemoteFileListingHandler(Executor monitorNotifier) {
         this.monitorNotifier = monitorNotifier;
     }
 
@@ -91,8 +89,12 @@ public class RemoteFileListingHandler implements StreamSubscriber {
      * Create/refresh the accumulator for a directory. If a prior listing was
      * in progress for the same path, it is discarded — the caller is asking
      * for a fresh view.
+     *
+     * <p>{@code destination} and {@code requestedPath} are echoed verbatim in
+     * the resulting ListFilesResponse: yamcs-web only applies pushed listings
+     * whose destination/remotePath match its current dialog selection.
      */
-    public void beginListing(String dirName) {
+    public void beginListing(String dirName, String destination, String requestedPath) {
         expireStaleListings();
         // Bound concurrent accumulators (symmetric with MAX_CACHED_LISTINGS)
         // so repeated fetches of distinct paths cannot grow the map until
@@ -104,7 +106,8 @@ public class RemoteFileListingHandler implements StreamSubscriber {
                 throw new InvalidRequestException("Too many listings in progress ("
                         + MAX_CACHED_LISTINGS + "); wait for one to complete or expire");
             }
-            inProgressListings.put(dirName, new ListingAccumulator(dirName));
+            inProgressListings.put(dirName,
+                    new ListingAccumulator(dirName, destination, requestedPath));
         }
     }
 
@@ -135,8 +138,8 @@ public class RemoteFileListingHandler implements StreamSubscriber {
         completeListing(dirName, "failed");
     }
 
-    public ListFilesResponse getFileList(String dirName) {
-        return fileListCache.get(dirName);
+    public ListFilesResponse getFileList(String requestedPath) {
+        return fileListCache.get(requestedPath);
     }
 
     public void saveFileList(ListFilesResponse listing) {
@@ -280,7 +283,7 @@ public class RemoteFileListingHandler implements StreamSubscriber {
             return;
         }
         ListFilesResponse response = acc.build(state);
-        fileListCache.put(dir, response);
+        fileListCache.put(response.getRemotePath(), response);
         LOG.info("Listing of {} {}: {} entries",
                 ObjectNames.forLog(dir), state, response.getFilesCount());
         notifyMonitors(response);
@@ -291,13 +294,17 @@ public class RemoteFileListingHandler implements StreamSubscriber {
      * directory listing. Flipped to a ListFilesResponse when the terminal
      * event arrives.
      */
-    private final class ListingAccumulator {
+    private static final class ListingAccumulator {
         private final String dirName;
+        private final String destination;
+        private final String requestedPath;
         private final List<RemoteFile> entries = new ArrayList<>();
         final long createdAt = System.currentTimeMillis();
 
-        ListingAccumulator(String dirName) {
+        ListingAccumulator(String dirName, String destination, String requestedPath) {
             this.dirName = dirName;
+            this.destination = destination;
+            this.requestedPath = requestedPath;
         }
 
         synchronized void addFile(String name, long size) {
@@ -334,8 +341,8 @@ public class RemoteFileListingHandler implements StreamSubscriber {
         synchronized ListFilesResponse build(String state) {
             long nowMs = System.currentTimeMillis();
             return ListFilesResponse.newBuilder()
-                    .setRemotePath(dirName)
-                    .setDestination(remoteEntityName)
+                    .setRemotePath(requestedPath)
+                    .setDestination(destination)
                     .setState(state)
                     .setListTime(Timestamp.newBuilder()
                             .setSeconds(nowMs / 1000)
