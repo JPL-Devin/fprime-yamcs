@@ -29,18 +29,6 @@ public class RemoteFileListingHandlerTest {
         return new Tuple(tdef, List.of(evt));
     }
 
-    private void feed(String type, String message) {
-        Event evt = Event.newBuilder()
-                .setSource("test")
-                .setSeqNumber(0)
-                .setGenerationTime(0)
-                .setReceptionTime(0)
-                .setType(type)
-                .setMessage(message)
-                .build();
-        handler.onTuple(null, eventTuple(evt));
-    }
-
     private void feedStructured(String type, Map<String, String> extra) {
         Event evt = Event.newBuilder()
                 .setSource("test")
@@ -66,11 +54,13 @@ public class RemoteFileListingHandlerTest {
     }
 
     @Test
-    public void regexListingAccumulatesAndCompletes() {
+    public void listingAccumulatesAndCompletes() {
         handler.beginListing("/data");
-        feed("DirectoryListing", "[DirectoryListing] Directory /data: a.bin (100 bytes)");
-        feed("DirectoryListingSubdir", "[DirectoryListingSubdir] Directory /data: sub");
-        feed("ListDirectorySucceeded", "[ListDirectorySucceeded] Directory /data contains 2 files");
+        feedStructured("DirectoryListing",
+                Map.of("dirName", "/data", "fileName", "a.bin", "fileSize", "100"));
+        feedStructured("DirectoryListingSubdir",
+                Map.of("dirName", "/data", "subdirName", "sub"));
+        feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
 
         ListFilesResponse listing = handler.getFileList("/data");
         assertEquals("completed", listing.getState());
@@ -84,48 +74,39 @@ public class RemoteFileListingHandlerTest {
     @Test
     public void fileNamesWithSpacesParse() {
         handler.beginListing("/data");
-        feed("DirectoryListing", "[DirectoryListing] Directory /data: my file.bin (5 bytes)");
-        feed("ListDirectorySucceeded", "[ListDirectorySucceeded] Directory /data contains 1 files");
+        feedStructured("DirectoryListing",
+                Map.of("dirName", "/data", "fileName", "my file.bin", "fileSize", "5"));
+        feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
         assertEquals("my file.bin", handler.getFileList("/data").getFiles(0).getName());
     }
 
     @Test
-    public void structuredArgsPreferredOverMessage() {
-        handler.beginListing("/d");
-        // A conflicting parseable message rides along: the structured extra
-        // args must win.
+    public void eventsWithoutExtraIgnored() {
+        handler.beginListing("/data");
         Event evt = Event.newBuilder()
                 .setSource("test")
                 .setSeqNumber(0)
                 .setGenerationTime(0)
                 .setReceptionTime(0)
                 .setType("DirectoryListing")
-                .setMessage("[DirectoryListing] Directory /d: wrong.bin (3 bytes)")
-                .putAllExtra(Map.of("dirName", "/d", "fileName", "x.bin", "fileSize", "7"))
+                .setMessage("[DirectoryListing] Directory /data: a.bin (3 bytes)")
                 .build();
         handler.onTuple(null, eventTuple(evt));
-        feedStructured("ListDirectorySucceeded", Map.of("dirName", "/d"));
-
-        ListFilesResponse listing = handler.getFileList("/d");
-        assertEquals("completed", listing.getState());
-        assertEquals(1, listing.getFilesCount());
-        assertEquals("x.bin", listing.getFiles(0).getName());
-        assertEquals(7, listing.getFiles(0).getSize());
+        feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
+        assertEquals(0, handler.getFileList("/data").getFilesCount());
     }
 
     @Test
     public void errorTerminalFailsListing() {
         handler.beginListing("/data");
-        feed("ListDirectoryError",
-                "[ListDirectoryError] Directory /data could not be read, status 1");
+        feedStructured("ListDirectoryError", Map.of("dirName", "/data", "status", "1"));
         assertEquals("failed", handler.getFileList("/data").getState());
     }
 
     @Test
     public void errorTerminalMatchesDirectoryNameWithSpaces() {
         handler.beginListing("/my data dir");
-        feed("ListDirectoryError",
-                "[ListDirectoryError] Directory /my data dir could not be read, status 1");
+        feedStructured("ListDirectoryError", Map.of("dirName", "/my data dir", "status", "1"));
         assertEquals("failed", handler.getFileList("/my data dir").getState());
     }
 
@@ -134,8 +115,7 @@ public class RemoteFileListingHandlerTest {
         for (int i = 0; i <= RemoteFileListingHandler.MAX_CACHED_LISTINGS; i++) {
             String dir = "/dir" + i;
             handler.beginListing(dir);
-            feed("ListDirectorySucceeded",
-                    "[ListDirectorySucceeded] Directory " + dir + " contains 0 files");
+            feedStructured("ListDirectorySucceeded", Map.of("dirName", dir));
         }
         assertNull(handler.getFileList("/dir0"), "oldest cached listing must be evicted");
         assertEquals("completed", handler
@@ -145,17 +125,18 @@ public class RemoteFileListingHandlerTest {
     @Test
     public void entriesForUnknownDirectoryIgnored() {
         handler.beginListing("/data");
-        feed("DirectoryListing", "[DirectoryListing] Directory /other: a.bin (1 bytes)");
-        feed("ListDirectorySucceeded", "[ListDirectorySucceeded] Directory /data contains 0 files");
+        feedStructured("DirectoryListing",
+                Map.of("dirName", "/other", "fileName", "a.bin", "fileSize", "1"));
+        feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
         assertEquals(0, handler.getFileList("/data").getFilesCount());
         assertNull(handler.getFileList("/other"));
     }
 
     @Test
-    public void malformedMessagesIgnored() {
+    public void incompleteExtraArgsIgnored() {
         handler.beginListing("/data");
-        feed("DirectoryListing", "garbage that does not match");
-        feed("ListDirectorySucceeded", "[ListDirectorySucceeded] Directory /data contains 0 files");
+        feedStructured("DirectoryListing", Map.of("dirName", "/data"));
+        feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
         assertEquals(0, handler.getFileList("/data").getFilesCount());
     }
 
@@ -170,7 +151,7 @@ public class RemoteFileListingHandlerTest {
         handler.registerMonitor(good);
 
         handler.beginListing("/data");
-        feed("ListDirectorySucceeded", "[ListDirectorySucceeded] Directory /data contains 0 files");
+        feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
         assertEquals(1, seen.size());
 
         handler.unregisterMonitor(bad);
@@ -198,7 +179,7 @@ public class RemoteFileListingHandlerTest {
         handler.beginListing("/data");
         handler.expireStaleListings();
         assertNull(handler.getFileList("/data"), "listing still in progress");
-        feed("ListDirectorySucceeded", "[ListDirectorySucceeded] Directory /data contains 0 files");
+        feedStructured("ListDirectorySucceeded", Map.of("dirName", "/data"));
         assertEquals("completed", handler.getFileList("/data").getState());
     }
 

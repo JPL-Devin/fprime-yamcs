@@ -11,8 +11,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import com.google.protobuf.Timestamp;
 
@@ -42,23 +40,6 @@ import org.yamcs.yarch.Tuple;
 public class RemoteFileListingHandler implements StreamSubscriber {
 
     private static final Logger LOG = LoggerFactory.getLogger(RemoteFileListingHandler.class);
-
-    /**
-     * F´ event format strings from {@code Svc/FileManager/Events.fppi} in nasa/fprime,
-     * with the {@code [EventName]} prefix that fprime-yamcs-events prepends
-     * before publishing to YAMCS. These are the canonical formats — the regex
-     * parser is coupled to this format and must be updated if F´ changes the
-     * event templates. The structured {@code Event.extra} map is preferred
-     * whenever the installed fprime-yamcs-events populates it.
-     */
-    private static final Pattern DIR_LISTING_RE = Pattern.compile(
-            "^\\[DirectoryListing\\] Directory (.+?): (.+?) \\((\\d+) bytes\\)$");
-    private static final Pattern DIR_LISTING_SUBDIR_RE = Pattern.compile(
-            "^\\[DirectoryListingSubdir\\] Directory (.+?): (.+?)$");
-    private static final Pattern LIST_DIR_SUCCEEDED_RE = Pattern.compile(
-            "^\\[ListDirectorySucceeded\\] Directory (.+?) contains (\\d+) files$");
-    // The error format is not strictly matched since any error is a terminal
-    // failure; only the event type and directory name are needed.
 
     /**
      * Maximum entries retained per in-progress listing. Entries beyond this
@@ -214,30 +195,31 @@ public class RemoteFileListingHandler implements StreamSubscriber {
             type = type.substring(dot + 1);
         }
 
-        // Prefer the structured `extra` map if fprime-yamcs-events populated
-        // it. Fall back to regex-parsing the message string for compatibility
-        // with older fprime-yamcs-events installs that discard the arg map.
+        // Event arguments come from the structured Event.extra map populated
+        // by fprime-yamcs-events.
         Map<String, String> extra = evt.getExtraMap();
-        boolean hasStructuredArgs = extra != null && !extra.isEmpty();
+        if (extra == null || extra.isEmpty()) {
+            return;
+        }
         String msg = evt.getMessage();
 
         try {
             switch (type) {
                 case "DirectoryListing":
-                    onDirectoryListing(hasStructuredArgs, extra, msg);
+                    onDirectoryListing(extra);
                     break;
                 case "DirectoryListingSubdir":
-                    onDirectoryListingSubdir(hasStructuredArgs, extra, msg);
+                    onDirectoryListingSubdir(extra);
                     break;
                 case "ListDirectoryStarted":
                     // Informational — the accumulator was already created by
                     // beginListing(). Nothing to do.
                     break;
                 case "ListDirectorySucceeded":
-                    onListDirectoryTerminal(hasStructuredArgs, extra, msg, true);
+                    onListDirectoryTerminal(extra, true);
                     break;
                 case "ListDirectoryError":
-                    onListDirectoryTerminal(hasStructuredArgs, extra, msg, false);
+                    onListDirectoryTerminal(extra, false);
                     break;
                 default:
                     // not a listing event
@@ -253,57 +235,25 @@ public class RemoteFileListingHandler implements StreamSubscriber {
         LOG.info("Stream {} closed", stream.getName());
     }
 
-    private void onDirectoryListing(boolean structured, Map<String, String> extra, String msg) {
-        String dir;
-        String file;
-        long size;
-        if (structured) {
-            dir = extra.get("dirName");
-            file = extra.get("fileName");
-            String sizeStr = extra.get("fileSize");
-            if (dir == null || file == null || sizeStr == null) {
-                return;
-            }
-            size = Long.parseLong(sizeStr);
-        } else {
-            if (msg == null) {
-                return;
-            }
-            Matcher m = DIR_LISTING_RE.matcher(msg);
-            if (!m.matches()) {
-                LOG.debug("DirectoryListing message did not match regex: {}",
-                        ObjectNames.forLog(msg));
-                return;
-            }
-            dir = m.group(1);
-            file = m.group(2);
-            size = Long.parseLong(m.group(3));
+    private void onDirectoryListing(Map<String, String> extra) {
+        String dir = extra.get("dirName");
+        String file = extra.get("fileName");
+        String sizeStr = extra.get("fileSize");
+        if (dir == null || file == null || sizeStr == null) {
+            return;
         }
+        long size = Long.parseLong(sizeStr);
         ListingAccumulator acc = inProgressListings.get(dir);
         if (acc != null) {
             acc.addFile(file, size);
         }
     }
 
-    private void onDirectoryListingSubdir(boolean structured, Map<String, String> extra, String msg) {
-        String dir;
-        String subdir;
-        if (structured) {
-            dir = extra.get("dirName");
-            subdir = extra.get("subdirName");
-            if (dir == null || subdir == null) {
-                return;
-            }
-        } else {
-            if (msg == null) {
-                return;
-            }
-            Matcher m = DIR_LISTING_SUBDIR_RE.matcher(msg);
-            if (!m.matches()) {
-                return;
-            }
-            dir = m.group(1);
-            subdir = m.group(2);
+    private void onDirectoryListingSubdir(Map<String, String> extra) {
+        String dir = extra.get("dirName");
+        String subdir = extra.get("subdirName");
+        if (dir == null || subdir == null) {
+            return;
         }
         ListingAccumulator acc = inProgressListings.get(dir);
         if (acc != null) {
@@ -311,57 +261,11 @@ public class RemoteFileListingHandler implements StreamSubscriber {
         }
     }
 
-    private void onListDirectoryTerminal(boolean structured, Map<String, String> extra,
-                                         String msg, boolean succeeded) {
-        String dir = null;
-        if (structured) {
-            dir = extra.get("dirName");
-        } else if (msg != null) {
-            if (succeeded) {
-                Matcher m = LIST_DIR_SUCCEEDED_RE.matcher(msg);
-                if (m.matches()) {
-                    dir = m.group(1);
-                }
-            } else {
-                dir = errorDirName(msg);
-            }
-        }
+    private void onListDirectoryTerminal(Map<String, String> extra, boolean succeeded) {
+        String dir = extra.get("dirName");
         if (dir != null) {
             completeListing(dir, succeeded ? "completed" : "failed");
         }
-    }
-
-    /**
-     * Extract the directory name from an unstructured ListDirectoryError
-     * message. Directory names may contain spaces, so first try to match an
-     * in-progress listing key against the text after "Directory "; fall back
-     * to the first space/comma-delimited token for unknown directories.
-     */
-    private String errorDirName(String msg) {
-        int dirStart = msg.indexOf("Directory ");
-        if (dirStart < 0) {
-            return null;
-        }
-        String rest = msg.substring(dirStart + "Directory ".length());
-        String best = null;
-        for (String candidate : inProgressListings.keySet()) {
-            if (rest.startsWith(candidate)
-                    && (best == null || candidate.length() > best.length())) {
-                best = candidate;
-            }
-        }
-        if (best != null) {
-            return best;
-        }
-        int end = rest.length();
-        for (int i = 0; i < rest.length(); i++) {
-            char c = rest.charAt(i);
-            if (c == ' ' || c == ',') {
-                end = i;
-                break;
-            }
-        }
-        return rest.substring(0, end);
     }
 
     /**
