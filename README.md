@@ -4,10 +4,18 @@ fprime-yamcs is designed to run YAMCS as the ground system when working with fpr
 
 ## Requirements
 
-`fprime-yamcs` requires the users to have `mvn` installed. See: [https://maven.apache.org/](https://maven.apache.org/).
+`fprime-yamcs` is pip-only: `pip install fprime-yamcs` brings in everything needed to run,
+including the YAMCS jars (`fprime-yamcs-bundle`, AGPL-3.0) and a trimmed Java runtime
+(`fprime-yamcs-runtime`, GPL-2.0 with Classpath Exception). Neither Maven nor a system JDK is
+required.
 
-> [!CAUTION]
-> `mvn` requires JDK to be installed
+The launcher resolves Java in this order: `JAVA_HOME`, then `java` on the `PATH` (Java 17+),
+then the pip-provided runtime.
+
+> [!NOTE]
+> Developers working from a source checkout (rather than a released wheel) still need `mvn`
+> and a JDK 17+ to build the jars: run `./scripts/build-jars.sh` once, or let the launcher
+> fall back to `mvn yamcs:run`.
 
 ## Usage
 
@@ -97,6 +105,43 @@ fprime-yamcs --yamcs-web-extension-dirs path/to/extension-dir ...
 Every top-level `.js` file in each directory is loaded as a module script by
 the YAMCS web interface, and the directory's files are served alongside the
 webapp's static files. Paths must not contain commas or whitespace.
+
+Extensions may also be shipped as pip packages: include the extension directory as package
+data and advertise it through a `fprime_yamcs.web_extensions` entry point resolving to the
+directory path (a `str`/`Path`, an iterable of them, or a zero-argument callable returning
+either). Installed extensions are discovered automatically — no flags required:
+
+```toml
+[project.entry-points."fprime_yamcs.web_extensions"]
+my_extension = "my_package:WEB_EXTENSION_DIR"
+```
+
+## YAMCS Plugins
+
+Projects with their own Java YAMCS plugins can add jars to the YAMCS classpath:
+
+```sh
+fprime-yamcs --yamcs-plugin-jars path/to/plugin.jar path/to/jar-dir ...
+```
+
+Plugin jars may also be shipped as pip packages: build the jar in CI (the reusable
+[`build-yamcs-plugin.yml`](.github/workflows/build-yamcs-plugin.yml) workflow does this),
+include it as package data, and advertise it through a `fprime_yamcs.plugin_jars` entry point
+resolving to the jar (or a directory of jars). Installed plugin jars are discovered
+automatically:
+
+```toml
+[project.entry-points."fprime_yamcs.plugin_jars"]
+my_plugin = "my_package:PLUGIN_JAR"
+```
+
+## Packages and Licensing
+
+| Package | Contents | License |
+| --- | --- | --- |
+| `fprime-yamcs` | Python code + the fprime-yamcs YAMCS plugin jar | Apache-2.0 |
+| `fprime-yamcs-bundle` | YAMCS and its dependency jars | AGPL-3.0 |
+| `fprime-yamcs-runtime` | jlink-trimmed Eclipse Temurin Java runtime | GPL-2.0 with Classpath Exception |
 
 ## Caveats
 

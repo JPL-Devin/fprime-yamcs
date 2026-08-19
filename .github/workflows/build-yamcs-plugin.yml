@@ -1,0 +1,49 @@
+# Reusable workflow for third-party YAMCS plugin authors: builds a plugin jar with Maven and
+# uploads it as an artifact, ready to be shipped as package data in a pip package that
+# advertises it through the `fprime_yamcs.plugin_jars` entry point group.
+#
+# Usage from another repository:
+#   jobs:
+#     plugin-jar:
+#       uses: fprime-community/fprime-yamcs/.github/workflows/build-yamcs-plugin.yml@main
+#       with:
+#         pom-file: my-plugin/pom.xml
+name: Build YAMCS Plugin Jar
+
+on:
+  workflow_call:
+    inputs:
+      pom-file:
+        description: Path to the plugin's Maven pom.xml, relative to the repository root
+        required: true
+        type: string
+      java-version:
+        description: Temurin JDK version used to build the plugin
+        required: false
+        type: string
+        default: '21'
+      artifact-name:
+        description: Name of the uploaded jar artifact
+        required: false
+        type: string
+        default: yamcs-plugin-jar
+
+jobs:
+  build-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - name: Build plugin jar
+        run: mvn -B -f '${{ inputs.pom-file }}' -Dyamcs.skip=true package
+      - name: Upload plugin jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ github.workspace }}/${{ inputs.pom-file }}/../target/*.jar
+          if-no-files-found: error

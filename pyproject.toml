@@ -39,7 +39,9 @@ dependencies = [
     "yamcs-client>=1.12.1,<2",  # 2.x removed yamcs.tmtc used by the events processor
     "fprime-xtce>=0.1.2",
     "PyYAML>=6.0.2",
-    "fprime-gds>=4.2.1"
+    "fprime-gds>=4.2.1",
+    "fprime-yamcs-bundle>=5.12.0.0,<5.13",  # YAMCS jars (AGPL-3.0), tracks yamcsVersion in the pom
+    "fprime-yamcs-runtime>=17",  # jlink-trimmed Java runtime, used when no system Java >= 17 exists
 ]
 
 [project.urls]
@@ -67,6 +69,7 @@ include = ["fprime_yamcs"]
 
 [tool.setuptools.package-data]
 fprime_yamcs = [
+    "jars/*.jar",
     "pox.xml",
     "src/main/yamcs/etc/*",
     "src/main/java/*",
