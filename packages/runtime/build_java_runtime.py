@@ -6,12 +6,15 @@ and assembles the runtime image with jlink. Requires a JDK (jdeps, jlink) on the
 runs at wheel-build time in CI, never on user machines.
 """
 import argparse
+import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent / "src" / "fprime_yamcs_runtime"
+PYPROJECT = Path(__file__).resolve().parent / "pyproject.toml"
 RUNTIME_DIR = PACKAGE_DIR / "java-runtime"
 DEFAULT_JARS_DIR = (
     Path(__file__).resolve().parent.parent / "bundle" / "src" / "fprime_yamcs_bundle" / "lib"
@@ -34,17 +37,29 @@ EXTRA_MODULES = [
 INCLUDED_LOCALES = ["en", "en-US"]
 
 
+def jdk_major_version() -> str:
+    """The JDK major version, single-sourced from the runtime package version"""
+    with PYPROJECT.open("rb") as f:
+        return tomllib.load(f)["project"]["version"].split(".")[0]
+
+
 def compute_modules(jars_dir: Path) -> str:
     """Compute the comma-separated module list for jlink from the YAMCS jars via jdeps"""
     jars = sorted(str(jar) for jar in jars_dir.glob("*.jar"))
     if not jars:
         raise SystemExit(f"No jars found in {jars_dir}. Run scripts/build-jars.sh first.")
+    # --multi-release must match the shipped JDK so version-specific classes are analyzed
     process = subprocess.run(
-        ["jdeps", "--multi-release", "base", "--ignore-missing-deps", "--print-module-deps",
-         "--class-path", str(jars_dir / "*"), *jars],
+        ["jdeps", "--multi-release", jdk_major_version(), "--ignore-missing-deps",
+         "--print-module-deps", "--class-path", str(jars_dir / "*"), *jars],
         capture_output=True, text=True, check=True,
     )
-    detected = process.stdout.strip().splitlines()[-1].split(",")
+    lines = process.stdout.strip().splitlines()
+    if not lines or not re.fullmatch(r"[A-Za-z0-9_.]+(,[A-Za-z0-9_.]+)*", lines[-1]):
+        raise SystemExit(
+            f"jdeps produced no module list.\nstdout: {process.stdout}\nstderr: {process.stderr}"
+        )
+    detected = lines[-1].split(",")
     modules = sorted(set(detected) | set(EXTRA_MODULES))
     print(f"[INFO] jlink modules: {','.join(modules)}")
     return ",".join(modules)

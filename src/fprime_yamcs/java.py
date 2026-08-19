@@ -39,7 +39,11 @@ PACKAGED_JARS_DIRECTORY = Path(__file__).resolve().parent / "jars"
 
 
 class JavaResolutionException(Exception):
-    """Raised when no suitable Java runtime can be located"""
+    """Raised when the Java runtime or the pip-provided jars cannot be located
+
+    `launch_yamcs` catches this exception to select the Maven fallback, so it covers every
+    condition preventing a direct pip-only launch (runtime and classpath alike).
+    """
 
 
 def java_major_version(java: Path) -> Optional[int]:
@@ -87,23 +91,26 @@ def find_java() -> Path:
         candidates.append(Path(path_java))
     for candidate in candidates:
         if not candidate.is_file():
+            print(f"[WARNING] Skipping {candidate}: does not exist", file=sys.stderr)
             continue
         version = java_major_version(candidate)
         if version is not None and version >= MINIMUM_JAVA_VERSION:
             return candidate
-        print(
-            f"[WARNING] Skipping {candidate}: Java {version} is older than the required "
-            f"Java {MINIMUM_JAVA_VERSION}",
-            file=sys.stderr,
+        reason = (
+            "could not determine the Java version" if version is None
+            else f"Java {version} is older than the required Java {MINIMUM_JAVA_VERSION}"
         )
+        print(f"[WARNING] Skipping {candidate}: {reason}", file=sys.stderr)
     try:
         from fprime_yamcs_runtime import JAVA  # type: ignore[import-not-found]
-        return Path(JAVA)
+        if Path(JAVA).is_file():
+            return Path(JAVA)
     except ImportError:
-        raise JavaResolutionException(
-            f"No Java {MINIMUM_JAVA_VERSION}+ runtime found. Set JAVA_HOME, add java to the "
-            "PATH, or `pip install fprime-yamcs-runtime`."
-        )
+        pass
+    raise JavaResolutionException(
+        f"No Java {MINIMUM_JAVA_VERSION}+ runtime found. Set JAVA_HOME, add java to the "
+        "PATH, or `pip install fprime-yamcs-runtime`."
+    )
 
 
 def yamcs_lib_jars() -> Optional[List[Path]]:
@@ -152,15 +159,15 @@ def _entry_point_paths(group: str) -> List[Path]:
     for entry in selected:
         try:
             loaded = entry.load()
+            if callable(loaded):
+                loaded = loaded()
+            values: Iterable = [loaded] if isinstance(loaded, (str, Path)) else loaded
+            resolved_values = [Path(value) for value in values]
         except Exception as exc:
             print(f"[WARNING] Failed to load entry point {entry.name} ({group}): {exc}",
                   file=sys.stderr)
             continue
-        if callable(loaded):
-            loaded = loaded()
-        values: Iterable = [loaded] if isinstance(loaded, (str, Path)) else loaded
-        for value in values:
-            resolved = Path(value)
+        for resolved in resolved_values:
             if not resolved.exists():
                 print(f"[WARNING] Entry point {entry.name} ({group}) resolved to missing path "
                       f"{resolved}. Skipping.", file=sys.stderr)
@@ -169,12 +176,17 @@ def _entry_point_paths(group: str) -> List[Path]:
     return paths
 
 
-def discovered_plugin_jars() -> List[Path]:
-    """ YAMCS plugin jars advertised by installed packages via entry points """
+def _expand_jars(paths: Iterable[Path]) -> List[Path]:
+    """ Expand jar paths: directories become their contained *.jar files """
     jars: List[Path] = []
-    for path in _entry_point_paths(PLUGIN_JAR_ENTRY_POINT_GROUP):
+    for path in paths:
         jars.extend(sorted(path.glob("*.jar")) if path.is_dir() else [path])
     return jars
+
+
+def discovered_plugin_jars() -> List[Path]:
+    """ YAMCS plugin jars advertised by installed packages via entry points """
+    return _expand_jars(_entry_point_paths(PLUGIN_JAR_ENTRY_POINT_GROUP))
 
 
 def discovered_web_extension_dirs() -> List[Path]:
@@ -184,10 +196,28 @@ def discovered_web_extension_dirs() -> List[Path]:
 
 def expand_jar_arguments(jar_arguments: Iterable[Path]) -> List[Path]:
     """ Expand user-supplied --yamcs-plugin-jars values: directories become their *.jar files """
-    jars: List[Path] = []
-    for argument in jar_arguments:
-        jars.extend(sorted(argument.glob("*.jar")) if argument.is_dir() else [argument])
-    return jars
+    return _expand_jars(jar_arguments)
+
+
+def yamcs_launch_command(java: Path, classpath: str, etc_dir: Path, data_dir: Path,
+                         jvm_args: Iterable[str] = ()) -> List[str]:
+    """ Assemble the direct-launch YAMCS command line
+
+    Args:
+        java: path to the java executable
+        classpath: the YAMCS classpath (from build_classpath)
+        etc_dir: the YAMCS etc configuration directory
+        data_dir: the YAMCS data directory
+        jvm_args: additional JVM arguments
+    Returns:
+        The command as a list of arguments
+    """
+    return [
+        str(java), *jvm_args,
+        "-Djava.util.logging.manager=org.yamcs.logging.YamcsLogManager",
+        "-cp", classpath, "org.yamcs.YamcsServer",
+        "--etc-dir", str(etc_dir), "--data-dir", str(data_dir),
+    ]
 
 
 def build_classpath(extra_jars: Iterable[Path]) -> str:
@@ -212,5 +242,8 @@ def build_classpath(extra_jars: Iterable[Path]) -> str:
             "The fprime-yamcs plugin jar is missing. Source checkouts must build it first "
             f"(scripts/build-jars.sh populates {PACKAGED_JARS_DIRECTORY})."
         )
-    entries = lib_jars + plugin_jars + discovered_plugin_jars() + list(extra_jars)
+    discovered = discovered_plugin_jars()
+    for jar in discovered:
+        print(f"[INFO] Discovered YAMCS plugin jar (entry point): {jar}", file=sys.stderr)
+    entries = lib_jars + plugin_jars + discovered + list(extra_jars)
     return os.pathsep.join(str(entry) for entry in entries)

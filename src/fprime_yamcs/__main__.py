@@ -44,9 +44,11 @@ from fprime_gds.executables.run_deployment import launch_app, launch_process
 from fprime_yamcs.java import (
     JavaResolutionException,
     build_classpath,
+    discovered_plugin_jars,
     discovered_web_extension_dirs,
     expand_jar_arguments,
     find_java,
+    yamcs_launch_command,
 )
 
 class YamcsParser(ParserBase):
@@ -141,16 +143,29 @@ class YamcsParser(ParserBase):
         """Handle arguments as parsed"""
         if args.yamcs_config_dir is not None and not args.yamcs_config_dir.is_dir():
             raise Exception(f"[ERROR] YAMCS config {args.yamcs_config_dir} is not a directory.")
-        args.yamcs_web_extension_dirs = list(args.yamcs_web_extension_dirs) + discovered_web_extension_dirs()
+        # User-supplied extension dirs fail fast; auto-discovered ones are skipped with a
+        # warning so an installed package cannot render the launcher unable to start
         for extension_dir in args.yamcs_web_extension_dirs:
             if not extension_dir.is_dir():
                 raise Exception(f"[ERROR] YAMCS web extension {extension_dir} is not a directory.")
             resolved = str(extension_dir.absolute())
             if "," in resolved or any(character.isspace() for character in resolved):
                 raise Exception(f"[ERROR] YAMCS web extension path may not contain commas or whitespace: {resolved}")
+        discovered = []
+        for extension_dir in discovered_web_extension_dirs():
+            resolved = str(extension_dir.absolute())
+            if "," in resolved or any(character.isspace() for character in resolved):
+                print(f"[WARNING] Skipping discovered web extension (comma/whitespace in path): {resolved}",
+                      file=sys.stderr)
+                continue
+            discovered.append(extension_dir)
+        args.yamcs_web_extension_dirs = list(args.yamcs_web_extension_dirs) + discovered
         for plugin_jar in args.yamcs_plugin_jars:
             if not plugin_jar.exists():
                 raise Exception(f"[ERROR] YAMCS plugin jar {plugin_jar} does not exist.")
+            if plugin_jar.is_dir() and not sorted(plugin_jar.glob("*.jar")):
+                print(f"[WARNING] YAMCS plugin jar directory {plugin_jar} contains no *.jar files.",
+                      file=sys.stderr)
         return args
 
 def yamcs_instances(config_directory: Path) -> List[str]:
@@ -289,6 +304,24 @@ def get_packet_ids(dictionary: Path, channel_patterns: List[str]) -> List[int]:
     return sorted(packet_ids)
 
 
+def anchor_relative_mdb_paths(instance_config: dict, base_directory: Path) -> bool:
+    """ Anchor relative MDB file paths in an instance configuration to a base directory
+
+    Args:
+        instance_config: a parsed yamcs.<instance>.yaml configuration
+        base_directory: the directory relative MDB paths are resolved against
+    Returns:
+        True when at least one path was rewritten
+    """
+    changed = False
+    for mdb in instance_config.get("mdb", []):
+        file_path = mdb.get("args", {}).get("file", None)
+        if file_path is not None and not Path(file_path).is_absolute():
+            mdb["args"]["file"] = str((base_directory / file_path).resolve())
+            changed = True
+    return changed
+
+
 def construct_temporary_configuration(config_directory: Path, instances: List[str], dictionary: Path, uplink_port: int, downlink_port: int, tm_inject_port: int, realtime_only_channels: List[str]) -> Tuple[Path, str]:
     """ Construct a temporary YAMCS configuration directory
 
@@ -322,17 +355,20 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
     print(f"[INFO] Updating YAMCS XTCE dictionary from {dictionary} to {xtce_dictionary}")
     subprocess.run(["fprime-to-xtce", "-o", str(xtce_dictionary), str(dictionary)], check=True)
 
+    # YAMCS is launched without a controlled working directory, so relative MDB paths in
+    # every instance configuration must be anchored to the temporary configuration directory
+    for other_instance_path in sorted((yamcs_working_config_dir / "etc").glob("yamcs.*.yaml")):
+        with other_instance_path.open() as f:
+            other_instance_config = yaml.safe_load(f)
+        if anchor_relative_mdb_paths(other_instance_config, yamcs_working_config_dir):
+            with other_instance_path.open("w") as f:
+                yaml.safe_dump(other_instance_config, f)
+
     print("[INFO] Setting ports for YAMCS UDP processors")
     instance_path = yamcs_working_config_dir / "etc" / f"yamcs.{fprime_instance}.yaml"
     assert instance_path.is_file(), f"YAMCS instance configuration {instance_path} not found."
     with instance_path.open() as f:
         instance_config = yaml.safe_load(f)
-    # YAMCS is launched without a controlled working directory, so relative MDB paths must
-    # be anchored to the temporary configuration directory
-    for mdb in instance_config.get("mdb", []):
-        file_path = mdb.get("args", {}).get("file", None)
-        if file_path is not None and not Path(file_path).is_absolute():
-            mdb["args"]["file"] = str((yamcs_working_config_dir / file_path).resolve())
     constants = get_dictionary_constants(dictionary, ["ComCfg.TmFrameFixedSize", "ComCfg.SpacecraftId"])
     realtime_only_ids = get_channel_ids(dictionary, realtime_only_channels)
     realtime_only_packet_ids = get_packet_ids(dictionary, realtime_only_channels) if realtime_only_channels else []
@@ -451,31 +487,32 @@ def launch_yamcs(parsed_args):
         extension_dirs = ",".join(str(d.absolute()) for d in parsed_args.yamcs_web_extension_dirs)
         jvm_args.append(f"-Dfprime.yamcs.webExtensions={extension_dirs}")
 
+    plugin_jars = expand_jar_arguments(parsed_args.yamcs_plugin_jars)
     try:
-        classpath = build_classpath(expand_jar_arguments(parsed_args.yamcs_plugin_jars))
+        classpath = build_classpath(plugin_jars)
         java = find_java()
     except JavaResolutionException as exc:
-        return launch_yamcs_maven(parsed_args, environment, jvm_args, exc)
+        return launch_yamcs_maven(parsed_args, environment, jvm_args, plugin_jars, exc)
 
     parsed_args.yamcs_data_dir.mkdir(parents=True, exist_ok=True)
     return launch_process(
-        [str(java), *jvm_args,
-         "-Djava.util.logging.manager=org.yamcs.logging.YamcsLogManager",
-         "-cp", classpath, "org.yamcs.YamcsServer",
-         "--etc-dir", str(parsed_args.yamcs_config_dir.absolute() / "etc"),
-         "--data-dir", str(parsed_args.yamcs_data_dir.absolute()),
-        ],
+        yamcs_launch_command(java, classpath,
+                             parsed_args.yamcs_config_dir.absolute() / "etc",
+                             parsed_args.yamcs_data_dir.absolute(), jvm_args),
         name="YAMCS", env=environment)
 
 
-def launch_yamcs_maven(parsed_args, environment, jvm_args, reason: Exception):
+def launch_yamcs_maven(parsed_args, environment, jvm_args, plugin_jars, reason: Exception):
     """ Launch YAMCS through Maven (fallback for source checkouts without prebuilt jars) """
+    if plugin_jars:
+        raise Exception(f"[ERROR] {reason} --yamcs-plugin-jars is not supported with the Maven fallback.")
     if shutil.which("mvn") is None:
         raise Exception(f"[ERROR] {reason} Alternatively install Maven (mvn) to build and run from source.")
     print(f"[WARNING] {reason} Falling back to Maven.", file=sys.stderr)
-    plugin_jars = expand_jar_arguments(parsed_args.yamcs_plugin_jars)
-    if plugin_jars:
-        raise Exception("[ERROR] --yamcs-plugin-jars is not supported with the Maven fallback.")
+    discovered = discovered_plugin_jars()
+    if discovered:
+        print(f"[WARNING] {len(discovered)} entry-point plugin jar(s) will not be loaded under "
+              "the Maven fallback.", file=sys.stderr)
     return launch_process(
         ["mvn", "-f", str(Path(__file__).resolve().parent / "yamcs" / "pom.xml"), "yamcs:run",
          f"-Dyamcs.configurationDirectory={parsed_args.yamcs_config_dir.absolute()}",

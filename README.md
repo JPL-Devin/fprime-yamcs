@@ -9,13 +9,19 @@ including the YAMCS jars (`fprime-yamcs-bundle`, AGPL-3.0) and a trimmed Java ru
 (`fprime-yamcs-runtime`, GPL-2.0 with Classpath Exception). Neither Maven nor a system JDK is
 required.
 
-The launcher resolves Java in this order: `JAVA_HOME`, then `java` on the `PATH` (Java 17+),
-then the pip-provided runtime.
+The launcher resolves Java in this order: `JAVA_HOME`, then `java` on the `PATH`, then the
+pip-provided runtime — using the first candidate that is Java 17 or newer.
+
+The `fprime-yamcs-runtime` wheel is published for Linux (x86_64, arm64), macOS (x86_64,
+arm64), and Windows (x86_64). On other platforms, install a system Java 17+ (set `JAVA_HOME`
+or add `java` to the `PATH`); `pip install fprime-yamcs` itself will fail there until a
+matching runtime wheel exists, since the runtime is a hard dependency.
 
 > [!NOTE]
 > Developers working from a source checkout (rather than a released wheel) still need `mvn`
 > and a JDK 17+ to build the jars: run `./scripts/build-jars.sh` once, or let the launcher
-> fall back to `mvn yamcs:run`.
+> fall back to `mvn yamcs:run`. The Maven fallback does not support `--yamcs-plugin-jars`
+> and does not load entry-point discovered plugin jars.
 
 ## Usage
 
@@ -128,7 +134,8 @@ Plugin jars may also be shipped as pip packages: build the jar in CI (the reusab
 [`build-yamcs-plugin.yml`](.github/workflows/build-yamcs-plugin.yml) workflow does this),
 include it as package data, and advertise it through a `fprime_yamcs.plugin_jars` entry point
 resolving to the jar (or a directory of jars). Installed plugin jars are discovered
-automatically:
+automatically. On the classpath, the YAMCS jars come first, then the fprime-yamcs plugin
+jar, then entry-point discovered jars, then `--yamcs-plugin-jars` values:
 
 ```toml
 [project.entry-points."fprime_yamcs.plugin_jars"]

@@ -9,13 +9,13 @@ PLUGIN_JAR_DIR="${ROOT}/src/fprime_yamcs/jars"
 BUNDLE_LIB_DIR="${ROOT}/packages/bundle/src/fprime_yamcs_bundle/lib"
 
 # -Dyamcs.skip=true skips the yamcs-maven-plugin bundle goal (the tar.gz is not needed)
-mvn -B -f "${POM}" -Dyamcs.skip=true package
+mvn -B -C -f "${POM}" -Dyamcs.skip=true package
 
 rm -rf "${PLUGIN_JAR_DIR}" "${BUNDLE_LIB_DIR}"
 mkdir -p "${PLUGIN_JAR_DIR}" "${BUNDLE_LIB_DIR}"
 cp "${ROOT}"/src/fprime_yamcs/yamcs/target/fprime-yamcs-*.jar "${PLUGIN_JAR_DIR}/"
 
-mvn -B -f "${POM}" -Dyamcs.skip=true dependency:copy-dependencies \
+mvn -B -C -f "${POM}" -Dyamcs.skip=true dependency:copy-dependencies \
     -DincludeScope=runtime -DoutputDirectory="${BUNDLE_LIB_DIR}"
 
 echo "[INFO] Plugin jar: $(ls "${PLUGIN_JAR_DIR}")"

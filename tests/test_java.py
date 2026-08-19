@@ -17,6 +17,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import os
+import sys
+import types
 from unittest.mock import patch
 
 import pytest
@@ -24,11 +26,32 @@ import pytest
 from fprime_yamcs import java as java_module
 from fprime_yamcs.java import (
     JavaResolutionException,
+    _entry_point_paths,
     build_classpath,
     expand_jar_arguments,
     find_java,
     java_major_version,
 )
+
+
+def fake_runtime(java_path):
+    """Build a fake fprime_yamcs_runtime module exposing the supplied JAVA path"""
+    module = types.ModuleType("fprime_yamcs_runtime")
+    module.JAVA = str(java_path)
+    return module
+
+
+class FakeEntryPoint:
+    """A stand-in for importlib.metadata.EntryPoint with a controlled load() result"""
+    def __init__(self, name, value=None, error=None):
+        self.name = name
+        self.value = value
+        self.error = error
+
+    def load(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
 
 
 def fake_version_run(output: str):
@@ -69,18 +92,85 @@ class TestFindJava:
             with patch.object(java_module, "java_major_version", return_value=21):
                 assert find_java() == java
 
-    def test_old_java_skipped(self, tmp_path):
+    def test_path_java_used_when_java_home_unset(self, tmp_path):
+        java = tmp_path / "java"
+        java.touch()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JAVA_HOME", None)
+            with patch.object(java_module.shutil, "which", return_value=str(java)):
+                with patch.object(java_module, "java_major_version", return_value=21):
+                    assert find_java() == java
+
+    def test_old_java_falls_back_to_pip_runtime(self, tmp_path):
         java = tmp_path / "bin" / "java"
         java.parent.mkdir()
         java.touch()
+        runtime_java = tmp_path / "runtime-java"
+        runtime_java.touch()
         with patch.dict(os.environ, {"JAVA_HOME": str(tmp_path)}):
             with patch.object(java_module, "java_major_version", return_value=8):
                 with patch.object(java_module.shutil, "which", return_value=None):
-                    # Falls through to the pip runtime, or raises when it is not installed
-                    try:
-                        assert find_java() != java
-                    except JavaResolutionException:
-                        pass
+                    with patch.dict(sys.modules, {"fprime_yamcs_runtime": fake_runtime(runtime_java)}):
+                        assert find_java() == runtime_java
+
+    def test_no_java_and_no_runtime_raises(self, tmp_path):
+        with patch.dict(os.environ, {"JAVA_HOME": str(tmp_path / "missing")}):
+            with patch.object(java_module.shutil, "which", return_value=None):
+                with patch.dict(sys.modules, {"fprime_yamcs_runtime": None}):
+                    with pytest.raises(JavaResolutionException):
+                        find_java()
+
+    def test_missing_runtime_executable_raises(self, tmp_path):
+        with patch.dict(os.environ, {"JAVA_HOME": str(tmp_path / "missing")}):
+            with patch.object(java_module.shutil, "which", return_value=None):
+                with patch.dict(sys.modules,
+                                {"fprime_yamcs_runtime": fake_runtime(tmp_path / "no-such-java")}):
+                    with pytest.raises(JavaResolutionException):
+                        find_java()
+
+
+class TestEntryPointPaths:
+    """_entry_point_paths resolves and hardens against misbehaving entry points"""
+
+    def run(self, entries):
+        with patch.object(java_module, "entry_points", lambda group: entries):
+            return _entry_point_paths("test.group")
+
+    def test_string_path_and_iterable_values(self, tmp_path):
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        entries = [
+            FakeEntryPoint("string", str(first)),
+            FakeEntryPoint("path", second),
+            FakeEntryPoint("iterable", [first, str(second)]),
+        ]
+        assert self.run(entries) == [first, second, first, second]
+
+    def test_callable_value(self, tmp_path):
+        entries = [FakeEntryPoint("callable", lambda: tmp_path)]
+        assert self.run(entries) == [tmp_path]
+
+    def test_missing_path_skipped(self, tmp_path):
+        entries = [FakeEntryPoint("missing", tmp_path / "does-not-exist"),
+                   FakeEntryPoint("present", tmp_path)]
+        assert self.run(entries) == [tmp_path]
+
+    def test_load_failure_skipped(self, tmp_path):
+        entries = [FakeEntryPoint("broken", error=ImportError("boom")),
+                   FakeEntryPoint("present", tmp_path)]
+        assert self.run(entries) == [tmp_path]
+
+    def test_raising_callable_skipped(self, tmp_path):
+        def explode():
+            raise RuntimeError("bad plugin")
+        entries = [FakeEntryPoint("explodes", explode), FakeEntryPoint("present", tmp_path)]
+        assert self.run(entries) == [tmp_path]
+
+    def test_invalid_value_skipped(self, tmp_path):
+        entries = [FakeEntryPoint("invalid", 42), FakeEntryPoint("present", tmp_path)]
+        assert self.run(entries) == [tmp_path]
 
 
 class TestClasspath:
@@ -112,3 +202,9 @@ class TestClasspath:
         with patch.object(java_module, "yamcs_lib_jars", return_value=None):
             with pytest.raises(JavaResolutionException):
                 build_classpath([])
+
+    def test_build_classpath_requires_plugin_jar(self, tmp_path):
+        with patch.object(java_module, "yamcs_lib_jars", return_value=[tmp_path / "core.jar"]):
+            with patch.object(java_module, "packaged_plugin_jars", return_value=[]):
+                with pytest.raises(JavaResolutionException):
+                    build_classpath([])

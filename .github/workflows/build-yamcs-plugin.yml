@@ -10,6 +10,9 @@
 #         pom-file: my-plugin/pom.xml
 name: Build YAMCS Plugin Jar
 
+permissions:
+  contents: read
+
 on:
   workflow_call:
     inputs:
@@ -39,11 +42,20 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
+      # The pom path is passed through the environment (never shell-interpolated) and must
+      # stay within the checkout
       - name: Build plugin jar
-        run: mvn -B -f '${{ inputs.pom-file }}' -Dyamcs.skip=true package
+        env:
+          POM_FILE: ${{ inputs.pom-file }}
+        run: |
+          case "${POM_FILE}" in
+            /*|*..*) echo "::error::pom-file must be a relative path within the repository"; exit 1 ;;
+          esac
+          mvn -B -C -f "${POM_FILE}" -Dyamcs.skip=true package
+          echo "TARGET_DIR=$(dirname "${POM_FILE}")/target" >> "$GITHUB_ENV"
       - name: Upload plugin jar
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact-name }}
-          path: ${{ github.workspace }}/${{ inputs.pom-file }}/../target/*.jar
+          path: ${{ env.TARGET_DIR }}/*.jar
           if-no-files-found: error

@@ -1,5 +1,8 @@
 name: Build and Publish Packages
 
+permissions:
+  contents: read
+
 on:
   release:
     types: [published]
@@ -55,13 +58,13 @@ jobs:
       - name: Check distributions
         run: twine check dist/*
       - name: Publish distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
       - name: Clean-Up Attestations
         run: rm dist/*.attestation
       - name: Publish distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
 
   publish-fprime-yamcs-bundle:
     needs: build-jars
@@ -89,7 +92,7 @@ jobs:
         run: twine check packages/bundle/dist/*
       # skip-existing: the bundle version only changes when YAMCS is upgraded
       - name: Publish distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: packages/bundle/dist
@@ -97,7 +100,7 @@ jobs:
       - name: Clean-Up Attestations
         run: rm -f packages/bundle/dist/*.attestation
       - name: Publish distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           packages-dir: packages/bundle/dist
           skip-existing: true
@@ -151,6 +154,11 @@ jobs:
           path: jdeps-jars/
       - name: Build Java runtime image
         run: python packages/runtime/build_java_runtime.py --jars-dir jdeps-jars
+      - name: Verify runtime image
+        shell: bash
+        run: |
+          BIN=packages/runtime/src/fprime_yamcs_runtime/java-runtime/bin
+          "${BIN}/$([ -f "${BIN}/java.exe" ] && echo java.exe || echo java)" -version
       - name: Upgrade Python Build Tools
         run: pip install -U build twine wheel
       # Wheel only: an sdist would not contain the jlink runtime image
@@ -164,7 +172,7 @@ jobs:
         run: twine check packages/runtime/dist/*
       # skip-existing: the runtime version only changes when the JDK is upgraded
       - name: Publish distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: packages/runtime/dist
@@ -173,7 +181,7 @@ jobs:
         shell: bash
         run: rm -f packages/runtime/dist/*.attestation
       - name: Publish distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           packages-dir: packages/runtime/dist
           skip-existing: true

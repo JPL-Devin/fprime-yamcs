@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main, devel]
@@ -20,6 +23,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Check version consistency
+        run: python scripts/check-versions.py
       - name: Build plugin jar and collect YAMCS jars
         run: ./scripts/build-jars.sh
       - name: Build Java runtime image
@@ -31,6 +36,7 @@ jobs:
           python -m build --wheel --outdir dist .
           python -m build --wheel --outdir dist packages/bundle
           python -m build --wheel --outdir dist packages/runtime
+          # Platform tag must match the linux-x86_64 entry in publish.yml
           python -m wheel tags --platform-tag manylinux_2_17_x86_64.manylinux2014_x86_64 --remove dist/fprime_yamcs_runtime-*.whl
       - name: Upload wheels
         uses: actions/upload-artifact@v4
