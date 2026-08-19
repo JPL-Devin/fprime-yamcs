@@ -18,7 +18,11 @@ def load_version(pyproject: Path) -> str:
 
 def main() -> int:
     pom = (ROOT / "src" / "fprime_yamcs" / "yamcs" / "pom.xml").read_text()
-    yamcs_version = re.search(r"<yamcsVersion>([^<]+)</yamcsVersion>", pom).group(1)
+    match = re.search(r"<yamcsVersion>([^<]+)</yamcsVersion>", pom)
+    if match is None:
+        print("[ERROR] No <yamcsVersion> found in the pom", file=sys.stderr)
+        return 1
+    yamcs_version = match.group(1)
 
     errors = []
     bundle_version = load_version(ROOT / "packages" / "bundle" / "pyproject.toml")
