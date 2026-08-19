@@ -13,9 +13,9 @@ The launcher resolves Java in this order: `JAVA_HOME`, then `java` on the `PATH`
 pip-provided runtime — using the first candidate that is Java 17 or newer.
 
 The `fprime-yamcs-runtime` wheel is published for Linux (x86_64, arm64), macOS (x86_64,
-arm64), and Windows (x86_64). On other platforms, install a system Java 17+ (set `JAVA_HOME`
-or add `java` to the `PATH`); `pip install fprime-yamcs` itself will fail there until a
-matching runtime wheel exists, since the runtime is a hard dependency.
+arm64), and Windows (x86_64), and installs automatically on those platforms via environment
+markers. On other platforms it is skipped: `pip install fprime-yamcs` still succeeds, and a
+system Java 17+ must be provided (set `JAVA_HOME` or add `java` to the `PATH`).
 
 > [!NOTE]
 > Developers working from a source checkout (rather than a released wheel) still need `mvn`
