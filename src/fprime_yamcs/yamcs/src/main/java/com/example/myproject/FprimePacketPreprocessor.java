@@ -117,8 +117,9 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
                     "Sequence count jump for APID: " + apid + " old seq: " + oldseq + " newseq: " + seq);
         }
 
-        int time_tag_offset = 0;
-        // Find time tags depending on APID
+        // Find time tags depending on APID. Packets of other APIDs (e.g. Fw::FilePacket, APID 3)
+        // carry no time tag and are stamped with the Yamcs wallclock time.
+        int time_tag_offset = -1;
         if (apid == APID_EVENT) {
             time_tag_offset = EVENT_TIME_TAG_OFFSET;
         } else if (apid == APID_TLM_PKT) {
@@ -138,15 +139,17 @@ public class FprimePacketPreprocessor extends AbstractPacketPreprocessor {
                 }
             }
         }
-        // Weird stuff with leap seconds, see
-        // https://docs.yamcs.org/yamcs-server-manual/general/time/
-        int leapSecondsOffset = 38;
-        int timeSec = ByteBuffer.wrap(bytes).getInt(time_tag_offset) + leapSecondsOffset;
-        int timeUsec = ByteBuffer.wrap(bytes).getInt(time_tag_offset + 4); // sec is 4 bytes width
-        long packetGenerationTime = (timeSec * 1000L) + (timeUsec / 1000L);
-
-        // Our custom packets don't include a secundary header with time information.
-        // Use Yamcs-local time instead.
+        long packetGenerationTime;
+        if (time_tag_offset >= 0 && bytes.length >= time_tag_offset + 8) {
+            // Weird stuff with leap seconds, see
+            // https://docs.yamcs.org/yamcs-server-manual/general/time/
+            int leapSecondsOffset = 38;
+            int timeSec = ByteBuffer.wrap(bytes).getInt(time_tag_offset) + leapSecondsOffset;
+            int timeUsec = ByteBuffer.wrap(bytes).getInt(time_tag_offset + 4); // sec is 4 bytes width
+            packetGenerationTime = (timeSec * 1000L) + (timeUsec / 1000L);
+        } else {
+            packetGenerationTime = TimeEncoding.getWallclockTime();
+        }
         packet.setGenerationTime(packetGenerationTime);
 
         // Use the full 32-bits, so that both APID and the count are included.
