@@ -29,7 +29,7 @@ This works because the event processor publishes each event with structured `ext
 
 ### Data-Flow Orb
 
-Every YAMCS web page also gains the data-flow indicator F Prime developers know from the `fprime-gds` main screen: a floating orb (bottom-right corner) that glows green while telemetry or events are flowing and turns into a red X once neither has been seen for 5 seconds (the same timeout `fprime-gds` uses). Hovering the orb shows a per-source breakdown (telemetry vs. events); the orb is grey while no YAMCS instance is selected.
+Every YAMCS web page also gains the data-flow indicator F Prime developers know from the `fprime-gds` main screen: an orb in the top toolbar (left of STORAGE) that glows green while telemetry or events are flowing and turns into a red X once neither has been seen for 5 seconds (the same timeout `fprime-gds` uses). Hovering the orb shows a per-source breakdown (telemetry vs. events); the orb is grey while no YAMCS instance is selected.
 
 Telemetry flow is detected from the selected processor's TM statistics stream (received-packet count deltas), and event flow from the instance's event stream, so the orb reflects live downlink activity regardless of which page is open.
 

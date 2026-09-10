@@ -1,38 +1,52 @@
 /**
  * fprime-dataflow.js:
  *
- * Yamcs web extension providing the GDS-style data-flow orb: a floating
- * indicator visible on every yamcs-web page that turns into a green orb
- * while telemetry or events are flowing and into a red X once neither has
- * been seen for DATA_TIMEOUT_MS (mirroring the orb in the fprime-gds UI).
+ * Yamcs web extension providing the GDS-style data-flow orb: an indicator
+ * in the yamcs-web top toolbar (left of STORAGE) that turns into a green
+ * orb while telemetry or events are flowing and into a red X once neither
+ * has been seen for DATA_TIMEOUT_MS (mirroring the orb in the fprime-gds UI).
+ * If the toolbar cannot be located it floats in the bottom-right corner.
  *
  * Telemetry flow is detected from the processor's TM statistics stream
  * (received-packet count deltas); event flow from the event subscription.
  *
- * The <fprime-dataflow-orb> element is instantiated by the
- * <fprime-yamcs> initializer defined in fprime-events.js.
+ * The <fprime-dataflow-orb> element is mounted by the <fprime-yamcs>
+ * initializer defined in fprime-events.js via FprimeDataflowOrbElement.mount.
  */
 
 // Matches the fprime-gds default (config_init.js dataTimeout: 5 seconds)
 const DATA_TIMEOUT_MS = 5000;
 
-const ORB_SIZE = 30;
+const ORB_SIZE = 24;
+
+// yamcs-web app bar (app.component.html): the orb goes before the right-hand
+// tab nav so it sits left of STORAGE
+const TOOLBAR_SELECTOR = "mat-toolbar-row.app-bar";
+const TOOLBAR_NAV_SELECTOR = "nav.top-tabs";
 
 const ORB_STYLE = `
   :host {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    height: 100%;
+    padding: 0 16px;
+    box-sizing: border-box;
+    font-family: Roboto, sans-serif;
+    cursor: default;
+  }
+  :host([placement="floating"]) {
     position: fixed;
     right: 16px;
     bottom: 16px;
     z-index: 10000;
-    display: block;
-    width: ${ORB_SIZE}px;
-    height: ${ORB_SIZE}px;
-    font-family: Roboto, sans-serif;
-    cursor: default;
+    height: auto;
+    padding: 0;
   }
   .orb {
-    width: 100%;
-    height: 100%;
+    width: ${ORB_SIZE}px;
+    height: ${ORB_SIZE}px;
     border-radius: 50%;
     box-sizing: border-box;
     display: flex;
@@ -67,8 +81,9 @@ const ORB_STYLE = `
   .detail {
     position: absolute;
     right: 0;
-    bottom: ${ORB_SIZE + 8}px;
+    top: 100%;
     display: none;
+    z-index: 10000;
     background: rgba(0, 0, 0, 0.85);
     color: #fff;
     font-size: 12px;
@@ -76,12 +91,44 @@ const ORB_STYLE = `
     padding: 6px 10px;
     white-space: nowrap;
   }
+  :host([placement="floating"]) .detail {
+    top: auto;
+    bottom: ${ORB_SIZE + 8}px;
+  }
   :host(:hover) .detail {
     display: block;
   }
 `;
 
 class FprimeDataflowOrbElement extends HTMLElement {
+  // Mounts the singleton orb left of the toolbar's tab nav (floating fallback);
+  // the nav renders asynchronously, so the toolbar is observed to keep it in place.
+  static mount(service) {
+    if (document.querySelector("fprime-dataflow-orb")) {
+      return;
+    }
+    const orb = document.createElement("fprime-dataflow-orb");
+    const toolbar = document.querySelector(TOOLBAR_SELECTOR);
+    if (!toolbar) {
+      orb.setAttribute("placement", "floating");
+      document.body.appendChild(orb);
+      orb.extensionService = service;
+      return;
+    }
+    orb.setAttribute("placement", "toolbar");
+    const place = () => {
+      const nav = toolbar.querySelector(TOOLBAR_NAV_SELECTOR);
+      if (nav && orb.nextElementSibling !== nav) {
+        toolbar.insertBefore(orb, nav);
+      } else if (!nav && orb.parentElement !== toolbar) {
+        toolbar.appendChild(orb);
+      }
+    };
+    place();
+    new MutationObserver(place).observe(toolbar, { childList: true });
+    orb.extensionService = service;
+  }
+
   constructor() {
     super();
     this._service = null;

@@ -612,11 +612,7 @@ class FprimeYamcsInitializer extends HTMLElement {
     // Mount the GDS-style data-flow orb (defined in fprime-dataflow.js);
     // whenDefined guards against script load-order differences
     customElements.whenDefined("fprime-dataflow-orb").then(() => {
-      if (!document.querySelector("fprime-dataflow-orb")) {
-        const orb = document.createElement("fprime-dataflow-orb");
-        orb.extensionService = service;
-        document.body.appendChild(orb);
-      }
+      customElements.get("fprime-dataflow-orb").mount(service);
     });
   }
 }
