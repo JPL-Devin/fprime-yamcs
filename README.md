@@ -92,6 +92,21 @@ mdb:
 
 This is to allow for automatic dictionary generation. Users declining this service must specify: `--no-convert-dictionary`.
 
+## SDLS Encryption (AES-256-GCM)
+
+SDLS is off by default: frames are clear-text unless a key file is supplied. Deployments built on the
+`Svc.ComCcsdsSdls` subtopology with `Svc.Ccsds.AesGcmEncryptor`/`AesGcmDecryptor` enable it with:
+
+```sh
+fprime-yamcs --yamcs-sdls-key-file path/to/sdls.key [--yamcs-sdls-spi 1]
+```
+
+The key file must hold exactly 32 bytes (AES-256) and be the same file read by the deployment's
+`Svc.Ccsds.SdlsFileKeyManager`. When set, the generated YAMCS configuration decrypts TM and encrypts TC with
+`org.yamcs.security.sdls.SecurityAssociationAes256Gcm128Factory` on the given SPI (default 1, matching the
+F Prime `SdlsSaRouter` default map), and the deployment binary is launched with `-k <key file>` in addition to
+the usual `-p`/`-a` arguments (override with `--application-arguments`).
+
 ## Web Extensions
 
 Projects may extend the YAMCS web interface with their own JavaScript:
