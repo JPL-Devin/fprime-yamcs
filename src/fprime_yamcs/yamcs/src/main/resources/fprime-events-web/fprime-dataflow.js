@@ -145,10 +145,13 @@ class FprimeDataflowOrbElement extends HTMLElement {
   set extensionService(service) {
     this._service = service;
     this.render();
-    // Re-subscribe whenever the instance/processor context changes
-    this._connectionSubscription = service.yamcs.connectionInfo$.subscribe(
-      (info) => this.connect(info),
-    );
+    this.subscribe();
+  }
+
+  // Subscriptions live only while the element is attached to the document, so
+  // moving the node (disconnect + reconnect) transparently re-subscribes.
+  connectedCallback() {
+    this.subscribe();
   }
 
   disconnectedCallback() {
@@ -157,6 +160,17 @@ class FprimeDataflowOrbElement extends HTMLElement {
       this._connectionSubscription = null;
     }
     this.disconnect();
+    this._context = null;
+  }
+
+  subscribe() {
+    if (!this._service || !this.isConnected || this._connectionSubscription) {
+      return;
+    }
+    // Re-subscribe whenever the instance/processor context changes
+    this._connectionSubscription = this._service.yamcs.connectionInfo$.subscribe(
+      (info) => this.connect(info),
+    );
   }
 
   disconnect() {
