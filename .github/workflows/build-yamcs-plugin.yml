@@ -51,7 +51,7 @@ jobs:
           case "${POM_FILE}" in
             /*|*..*) echo "::error::pom-file must be a relative path within the repository"; exit 1 ;;
           esac
-          mvn -B -C -f "${POM_FILE}" -Dyamcs.skip=true package
+          mvn -B -C -f "${POM_FILE}" -Dyamcs.bundle.skip=true package
           echo "TARGET_DIR=$(dirname "${POM_FILE}")/target" >> "$GITHUB_ENV"
       - name: Upload plugin jar
         uses: actions/upload-artifact@v4
