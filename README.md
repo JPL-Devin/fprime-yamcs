@@ -6,16 +6,17 @@ fprime-yamcs is designed to run YAMCS as the ground system when working with fpr
 
 `fprime-yamcs` is pip-only: `pip install fprime-yamcs` brings in everything needed to run,
 including the YAMCS jars (`fprime-yamcs-bundle`, AGPL-3.0) and a trimmed Java runtime
-(`fprime-yamcs-runtime`, GPL-2.0 with Classpath Exception). Neither Maven nor a system JDK is
-required.
+([`fprime-jre`](https://github.com/fprime-community/fprime-jre), Eclipse Temurin 25, GPL-2.0
+with Classpath Exception). Neither Maven nor a system JDK is required.
 
 The launcher resolves Java in this order: `JAVA_HOME`, then `java` on the `PATH`, then the
 pip-provided runtime — using the first candidate that is Java 17 or newer.
 
-The `fprime-yamcs-runtime` wheel is published for Linux (x86_64, arm64), macOS (x86_64,
-arm64), and Windows (x86_64), and installs automatically on those platforms via environment
-markers. On other platforms it is skipped: `pip install fprime-yamcs` still succeeds, and a
-system Java 17+ must be provided (set `JAVA_HOME` or add `java` to the `PATH`).
+`fprime-jre` is published for Linux (x86_64, arm64), macOS (x86_64, arm64), and Windows
+(x86_64), and installs automatically on those platforms via environment markers; it also puts
+a `java` command on the `PATH` of the Python environment. On other platforms it is skipped:
+`pip install fprime-yamcs` still succeeds, and a system Java 17+ must be provided (set
+`JAVA_HOME` or add `java` to the `PATH`).
 
 > [!NOTE]
 > Developers working from a source checkout (rather than a released wheel) still need `mvn`
@@ -148,7 +149,7 @@ my_plugin = "my_package:PLUGIN_JAR"
 | --- | --- | --- |
 | `fprime-yamcs` | Python code + the fprime-yamcs YAMCS plugin jar | Apache-2.0 |
 | `fprime-yamcs-bundle` | YAMCS and its dependency jars | AGPL-3.0 |
-| `fprime-yamcs-runtime` | jlink-trimmed Eclipse Temurin Java runtime | GPL-2.0 with Classpath Exception |
+| [`fprime-jre`](https://github.com/fprime-community/fprime-jre) | jlink-trimmed Eclipse Temurin Java runtime | GPL-2.0 with Classpath Exception |
 
 ## Caveats
 

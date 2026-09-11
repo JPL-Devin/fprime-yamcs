@@ -1,7 +1,7 @@
 """ F Prime YAMCS: pip-only smoke test
 
 Verifies a pip-only installation of fprime-yamcs: the Java runtime resolves to the
-fprime-yamcs-runtime wheel, the classpath assembles from fprime-yamcs-bundle plus the packaged
+fprime-jre wheel, the classpath assembles from fprime-yamcs-bundle plus the packaged
 plugin jar, and YAMCS starts, loads the F Prime plugin, and serves its HTTP API. Intended to
 run in a container with neither Maven nor a system Java installed.
 """
@@ -28,13 +28,24 @@ def check(condition: bool, message: str):
 
 
 def resolve_pip_only_java() -> Path:
-    """Confirm the pip-provided runtime is used and no build tooling is present"""
+    """Confirm the pip-provided runtime is used and no build tooling is present
+
+    fprime-jre installs a `java` console script into the environment, so any `java` on the PATH
+    must be that script; find_java then resolves it (or the bundled binary directly).
+    """
     check(shutil.which("mvn") is None, "mvn must not be installed for this smoke test")
-    check(shutil.which("java") is None, "java must not be on the PATH for this smoke test")
+    check(shutil.which("javac") is None, "javac must not be on the PATH for this smoke test")
+    from fprime_jre import JAVA, JAVA_HOME
     from fprime_yamcs.java import find_java
-    from fprime_yamcs_runtime import JAVA
+    path_java = shutil.which("java")
+    if path_java is not None:
+        shim_home = subprocess.run([path_java, "-XshowSettings:properties", "-version"],
+                                   capture_output=True, text=True, check=True).stderr
+        check(f"java.home = {JAVA_HOME}" in shim_home,
+              f"java on the PATH ({path_java}) is not the fprime-jre shim")
     java = find_java()
-    check(java == Path(JAVA), f"Expected the pip-provided runtime {JAVA}, resolved {java}")
+    check(java == Path(JAVA) or (path_java is not None and java == Path(path_java)),
+          f"Expected the pip-provided runtime {JAVA}, resolved {java}")
     version = subprocess.run([str(java), "-version"], capture_output=True, text=True, check=True)
     print(f"[INFO] Resolved pip-provided Java: {java}\n{version.stderr.strip()}")
     return java

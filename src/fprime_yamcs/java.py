@@ -77,7 +77,7 @@ def find_java() -> Path:
     """ Locate a suitable Java runtime
 
     Resolution order: JAVA_HOME, then `java` on the PATH, then the pip-installed
-    fprime-yamcs-runtime package. Candidates below MINIMUM_JAVA_VERSION are skipped.
+    fprime-jre package. Candidates below MINIMUM_JAVA_VERSION are skipped.
 
     Returns:
         The path to a java executable of at least MINIMUM_JAVA_VERSION
@@ -102,14 +102,14 @@ def find_java() -> Path:
         )
         print(f"[WARNING] Skipping {candidate}: {reason}", file=sys.stderr)
     try:
-        from fprime_yamcs_runtime import JAVA  # type: ignore[import-not-found]
+        from fprime_jre import JAVA  # type: ignore[import-not-found]
         if Path(JAVA).is_file():
             return Path(JAVA)
     except ImportError:
         pass
     raise JavaResolutionException(
         f"No Java {MINIMUM_JAVA_VERSION}+ runtime found. Set JAVA_HOME, add java to the "
-        "PATH, or `pip install fprime-yamcs-runtime`."
+        "PATH, or `pip install fprime-jre`."
     )
 
 

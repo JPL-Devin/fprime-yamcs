@@ -1,7 +1,7 @@
 """Verify version consistency across the fprime-yamcs packages
 
 Checks that the fprime-yamcs-bundle version tracks the YAMCS version in the pom, the main
-package's bundle constraint matches, and the runtime JDK meets the minimum Java version.
+package's bundle constraint matches, and the fprime-jre constraint meets the minimum Java version.
 """
 import re
 import sys
@@ -39,16 +39,18 @@ def main() -> int:
 
     sys.path.insert(0, str(ROOT / "src"))
     from fprime_yamcs.java import MINIMUM_JAVA_VERSION
-    runtime_version = load_version(ROOT / "packages" / "runtime" / "pyproject.toml")
-    if int(runtime_version.split(".")[0]) < MINIMUM_JAVA_VERSION:
-        errors.append(f"fprime-yamcs-runtime JDK {runtime_version} is below the minimum "
+    jre_constraint = next((d for d in dependencies if d.startswith("fprime-jre")), "")
+    jre_match = re.search(r">=(\d+)", jre_constraint)
+    jre_version = jre_match.group(1) if jre_match else "?"
+    if jre_match is None or int(jre_version) < MINIMUM_JAVA_VERSION:
+        errors.append(f"fprime-jre constraint '{jre_constraint}' does not require at least "
                       f"Java {MINIMUM_JAVA_VERSION}")
 
     for error in errors:
         print(f"[ERROR] {error}", file=sys.stderr)
     if not errors:
         print(f"[INFO] Versions consistent: YAMCS {yamcs_version}, bundle {bundle_version}, "
-              f"runtime JDK {runtime_version}")
+              f"fprime-jre >= {jre_version}")
     return 1 if errors else 0
 
 

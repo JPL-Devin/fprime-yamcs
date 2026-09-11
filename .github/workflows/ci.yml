@@ -27,17 +27,12 @@ jobs:
         run: python scripts/check-versions.py
       - name: Build plugin jar and collect YAMCS jars
         run: ./scripts/build-jars.sh
-      - name: Build Java runtime image
-        run: python packages/runtime/build_java_runtime.py
       - name: Upgrade Python Build Tools
         run: pip install -U build wheel
       - name: Build wheels
         run: |
           python -m build --wheel --outdir dist .
           python -m build --wheel --outdir dist packages/bundle
-          python -m build --wheel --outdir dist packages/runtime
-          # Platform tag must match the linux-x86_64 entry in publish.yml
-          python -m wheel tags --platform-tag manylinux_2_17_x86_64.manylinux2014_x86_64 --remove dist/fprime_yamcs_runtime-*.whl
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -64,7 +59,8 @@ jobs:
       - name: Run unit tests
         run: pytest tests/
 
-  # Prove a pip-only install works: no Maven and no system Java in the container
+  # Prove a pip-only install works: no Maven and no system Java in the container (the Java
+  # runtime comes from the fprime-jre dependency on PyPI)
   smoke-test:
     needs: build
     runs-on: ubuntu-latest

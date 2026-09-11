@@ -35,8 +35,8 @@ from fprime_yamcs.java import (
 
 
 def fake_runtime(java_path):
-    """Build a fake fprime_yamcs_runtime module exposing the supplied JAVA path"""
-    module = types.ModuleType("fprime_yamcs_runtime")
+    """Build a fake fprime_jre module exposing the supplied JAVA path"""
+    module = types.ModuleType("fprime_jre")
     module.JAVA = str(java_path)
     return module
 
@@ -110,13 +110,13 @@ class TestFindJava:
         with patch.dict(os.environ, {"JAVA_HOME": str(tmp_path)}):
             with patch.object(java_module, "java_major_version", return_value=8):
                 with patch.object(java_module.shutil, "which", return_value=None):
-                    with patch.dict(sys.modules, {"fprime_yamcs_runtime": fake_runtime(runtime_java)}):
+                    with patch.dict(sys.modules, {"fprime_jre": fake_runtime(runtime_java)}):
                         assert find_java() == runtime_java
 
     def test_no_java_and_no_runtime_raises(self, tmp_path):
         with patch.dict(os.environ, {"JAVA_HOME": str(tmp_path / "missing")}):
             with patch.object(java_module.shutil, "which", return_value=None):
-                with patch.dict(sys.modules, {"fprime_yamcs_runtime": None}):
+                with patch.dict(sys.modules, {"fprime_jre": None}):
                     with pytest.raises(JavaResolutionException):
                         find_java()
 
@@ -124,7 +124,7 @@ class TestFindJava:
         with patch.dict(os.environ, {"JAVA_HOME": str(tmp_path / "missing")}):
             with patch.object(java_module.shutil, "which", return_value=None):
                 with patch.dict(sys.modules,
-                                {"fprime_yamcs_runtime": fake_runtime(tmp_path / "no-such-java")}):
+                                {"fprime_jre": fake_runtime(tmp_path / "no-such-java")}):
                     with pytest.raises(JavaResolutionException):
                         find_java()
 
