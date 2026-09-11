@@ -16,13 +16,26 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import sys
 from argparse import Namespace
 from unittest.mock import patch
 
 import pytest
 
+from fprime_gds.executables.cli import ParserBase
+from fprime_gds.plugin.system import Plugins
+
 from fprime_yamcs import __main__ as main_module
-from fprime_yamcs.__main__ import YamcsParser, anchor_relative_mdb_paths, launch_yamcs_maven
+from fprime_yamcs.__main__ import (
+    YamcsParser,
+    YamcsPluginArgumentParser,
+    anchor_relative_mdb_paths,
+    check_comm_bridge_ports,
+    comm_bridge_arguments,
+    launch_comm_bridge,
+    launch_yamcs_maven,
+    needs_comm_bridge,
+)
 
 
 def make_args(tmp_path, **overrides):
@@ -102,6 +115,66 @@ class TestAnchorRelativeMdbPaths:
 
     def test_no_mdb_section(self, tmp_path):
         assert anchor_relative_mdb_paths({}, tmp_path) is False
+
+
+def parse_comm_args(*argv):
+    """Parse launcher plugin and YAMCS arguments the way the launcher does"""
+    Plugins.system()
+    with patch.object(main_module, "discovered_web_extension_dirs", return_value=[]):
+        with patch.object(sys, "argv", ["fprime-yamcs", *argv]):
+            args, _ = ParserBase.parse_args([YamcsPluginArgumentParser, YamcsParser], "test")
+    return args
+
+
+class TestCommBridgeAutostart:
+    """The launcher bridges every communication adapter other than udp through fprime-yamcs-comm"""
+
+    def test_default_selection_is_udp_without_bridge(self):
+        args = parse_comm_args()
+        assert args.communication_selection == "udp"
+        assert needs_comm_bridge(args.communication_selection) is False
+
+    @pytest.mark.parametrize("selection", ["ip", "uart"])
+    def test_non_udp_selection_needs_bridge(self, selection):
+        assert needs_comm_bridge(selection) is True
+
+    def test_none_selection_needs_no_bridge(self):
+        assert needs_comm_bridge("none") is False
+
+    def test_bridge_arguments_reproduce_adapter_and_yamcs_ports(self):
+        args = parse_comm_args("--communication-selection", "ip", "--ip-port", "50050", "--ip-client",
+                               "--udp-downlink-port", "60000", "--udp-uplink-port", "60001")
+        arguments = comm_bridge_arguments(args)
+        for expected in (["--communication-selection", "ip"], ["--ip-port", "50050"], ["--ip-client"],
+                         ["--tm-host", "127.0.0.1", "--tm-port", "60000"],
+                         ["--tc-host", "127.0.0.1", "--tc-port", "60001"]):
+            assert any(arguments[i:i + len(expected)] == expected for i in range(len(arguments)))
+        assert "--framing-selection" not in arguments
+
+    def test_bridge_arguments_carry_uart_options(self):
+        args = parse_comm_args("--communication-selection", "uart", "--uart-device", "/dev/ttyUSB3",
+                               "--uart-baud", "115200")
+        arguments = comm_bridge_arguments(args)
+        assert arguments[:2] == ["--communication-selection", "uart"]
+        assert arguments[arguments.index("--uart-device") + 1] == "/dev/ttyUSB3"
+        assert arguments[arguments.index("--uart-baud") + 1] == "115200"
+
+    def test_ip_port_colliding_with_yamcs_rejected(self):
+        args = parse_comm_args("--communication-selection", "ip", "--ip-port", "50001")
+        with pytest.raises(Exception, match="collides with YAMCS --udp-uplink-port"):
+            check_comm_bridge_ports(args)
+
+    def test_distinct_ip_port_accepted(self):
+        check_comm_bridge_ports(parse_comm_args("--communication-selection", "ip", "--ip-port", "50050"))
+
+    def test_launch_runs_comm_module(self):
+        args = parse_comm_args("--communication-selection", "ip", "--ip-port", "50050")
+        with patch.object(main_module, "launch_process") as launch:
+            launch_comm_bridge(args)
+        command = launch.call_args.args[0]
+        assert command[:4] == [sys.executable, "-u", "-m", "fprime_yamcs.comm"]
+        assert command[4:] == comm_bridge_arguments(args)
+        assert launch.call_args.kwargs["name"] == "fprime-yamcs-comm[ip]"
 
 
 class TestMavenFallback:

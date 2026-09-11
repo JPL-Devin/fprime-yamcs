@@ -28,6 +28,16 @@ a `java` command on the `PATH` of the Python environment. On other platforms it 
 
 Install this package and run `fprime-yamcs` on a compatible F Prime deployment.
 
+`fprime-yamcs` accepts the F Prime GDS communication adapter options (`--communication-selection` and the selected adapter's flags). The default, `udp`, expects the deployment to exchange UDP datagrams with the YAMCS links directly. Any other adapter (`ip`, `uart`, or an installed adapter plugin) makes the launcher start [`fprime-yamcs-comm`](#fprime-yamcs-comm-communication-bridge) automatically with the same adapter options, bridging the endpoint to the YAMCS UDP links. For example, a deployment using `Drv.TcpClient` (like the F Prime `Ref` deployment) is served with:
+
+```
+fprime-yamcs --dictionary build-artifacts/Linux/Ref/dict/RefTopologyDictionary.json \
+    --communication-selection ip --ip-port 50050
+```
+
+> [!NOTE]
+> The `ip` adapter binds both TCP and UDP on `--ip-port`, so it must differ from the YAMCS UDP ports (`--udp-downlink-port` 50000, `--udp-uplink-port` 50001, `--udp-tm-inject-port` 50002 by default). The launcher refuses colliding ports. The deployment binary (`--app`) is launched with `-a`/`-p` matching `--ip-address`/`--ip-port`.
+
 ## fprime-yamcs-events: Event Processor
 
 `fprime-yamcs-events` runs the F Prime event processor standalone: it reads the F Prime JSON topology dictionary and publishes F Prime events into YAMCS. It is launched automatically by `fprime-yamcs`; run it directly when operating YAMCS without the full `fprime-yamcs` launcher.
@@ -56,7 +66,7 @@ Telemetry flow is detected from the selected processor's TM statistics stream (r
 
 ## fprime-yamcs-comm: Communication Bridge
 
-`fprime-yamcs-comm` bridges bidirectional communication between an F Prime endpoint and the YAMCS UDP intake/outlet:
+`fprime-yamcs-comm` bridges bidirectional communication between an F Prime endpoint and the YAMCS UDP intake/outlet. `fprime-yamcs` starts it automatically whenever a communication adapter other than `udp` is selected (forwarding the adapter options and the configured YAMCS UDP ports, with the default `no-op` framing); run it directly when operating YAMCS without the full launcher.
 
 - The endpoint side is reached through an F Prime GDS **communication adapter plugin** (`--communication-selection`: `uart`, `ip`, or any installed adapter plugin).
 - The YAMCS side pushes deframed packets as UDP datagrams to the telemetry intake (`--tm-host`/`--tm-port`, default `127.0.0.1:50000`) and receives command datagrams on a local UDP port (`--tc-host`/`--tc-port`, default `127.0.0.1:50001`). Command datagrams are only accepted from the TM host, loopback (`127.0.0.1`), and any hosts supplied via `--tc-allowed-source`; hostnames are resolved to IPv4 addresses once at startup and compared against the datagram source IP.
@@ -174,7 +184,7 @@ my_plugin = "my_package:PLUGIN_JAR"
 
 ## Caveats
 
-Currently, the default configuration of YAMCS requires F Prime to connect a CCSDS TC/TM framer/deframer to the Drv.Udp component ensuring that UDP is the transport mechanism.
+Currently, the default configuration of YAMCS requires F Prime to connect a CCSDS TC/TM framer/deframer to the Drv.Udp component ensuring that UDP is the transport mechanism, unless a non-`udp` communication adapter is selected so that `fprime-yamcs-comm` bridges the endpoint to the YAMCS UDP links.
 
 ```mermaid id="th4eai"
 flowchart LR
