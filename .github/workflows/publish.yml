@@ -1,11 +1,38 @@
-name: Build and Publish Package
+name: Build and Publish Packages
+
+permissions:
+  contents: read
 
 on:
   release:
     types: [published]
 
 jobs:
-  Release-PyPI-Package:
+  build-jars:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Build plugin jar and collect YAMCS jars
+        run: ./scripts/build-jars.sh
+      - name: Upload plugin jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-jar
+          path: src/fprime_yamcs/jars/
+      - name: Upload YAMCS jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: yamcs-lib
+          path: packages/bundle/src/fprime_yamcs_bundle/lib/
+
+  publish-fprime-yamcs:
+    needs: build-jars
     runs-on: ubuntu-latest
     permissions:
       # this permission is mandatory for trusted publishing
@@ -19,6 +46,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Download plugin jar
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-jar
+          path: src/fprime_yamcs/jars/
       - name: Upgrade Python Build Tools
         run: pip install -U build twine
       - name: Build distributions
@@ -26,10 +58,50 @@ jobs:
       - name: Check distributions
         run: twine check dist/*
       - name: Publish distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
       - name: Clean-Up Attestations
         run: rm dist/*.attestation
       - name: Publish distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+
+  publish-fprime-yamcs-bundle:
+    needs: build-jars
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download YAMCS jars
+        uses: actions/download-artifact@v4
+        with:
+          name: yamcs-lib
+          path: packages/bundle/src/fprime_yamcs_bundle/lib/
+      - name: Upgrade Python Build Tools
+        run: pip install -U build twine
+      # Wheel only: an sdist would not contain the Maven-resolved jars
+      - name: Build wheel
+        run: python -m build --wheel packages/bundle
+      - name: Check distributions
+        run: twine check packages/bundle/dist/*
+      # skip-existing: the bundle version only changes when YAMCS is upgraded
+      - name: Publish distributions to TestPyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: packages/bundle/dist
+          skip-existing: true
+      - name: Clean-Up Attestations
+        run: rm -f packages/bundle/dist/*.attestation
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: packages/bundle/dist
+          skip-existing: true
+
