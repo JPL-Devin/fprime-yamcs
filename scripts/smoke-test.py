@@ -19,6 +19,11 @@ HTTP_TIMEOUT_SECONDS = 5
 POLL_INTERVAL_SECONDS = 2
 SHUTDOWN_TIMEOUT_SECONDS = 30
 YAMCS_URL = "http://127.0.0.1:8090"
+# Scripts served by the F Prime events web extension and the custom element each defines
+WEB_EXTENSION_SCRIPTS = {
+    "fprime-events.js": "fprime-events",
+    "fprime-dataflow.js": "fprime-dataflow-orb",
+}
 
 
 def check(condition: bool, message: str):
@@ -90,6 +95,12 @@ def main() -> int:
                   f"F Prime plugin not loaded. Plugins: {plugins}")
             with urllib.request.urlopen(YAMCS_URL, timeout=HTTP_TIMEOUT_SECONDS) as response:
                 check(response.status == 200, f"yamcs-web returned {response.status}")
+            # The events/orb extension registers its scripts as yamcs-web static roots
+            for script, element in WEB_EXTENSION_SCRIPTS.items():
+                with urllib.request.urlopen(f"{YAMCS_URL}/{script}", timeout=HTTP_TIMEOUT_SECONDS) as response:
+                    body = response.read().decode("utf-8", errors="replace")
+                check(f'customElements.define("{element}"' in body,
+                      f"F Prime web extension not registered: {script} does not define <{element}>")
             print("[INFO] Smoke test passed")
         finally:
             process.terminate()

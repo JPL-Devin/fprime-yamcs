@@ -8,14 +8,15 @@ POM="${ROOT}/src/fprime_yamcs/yamcs/pom.xml"
 PLUGIN_JAR_DIR="${ROOT}/src/fprime_yamcs/jars"
 BUNDLE_LIB_DIR="${ROOT}/packages/bundle/src/fprime_yamcs_bundle/lib"
 
-# -Dyamcs.skip=true skips the yamcs-maven-plugin bundle goal (the tar.gz is not needed)
-mvn -B -C -f "${POM}" -Dyamcs.skip=true package
+# -Dyamcs.bundle.skip=true skips only the tar.gz bundle goal; -Dyamcs.skip=true would also
+# skip 'detect', which generates META-INF/services/org.yamcs.Plugin for every Plugin class
+mvn -B -C -f "${POM}" -Dyamcs.bundle.skip=true package
 
 rm -rf "${PLUGIN_JAR_DIR}" "${BUNDLE_LIB_DIR}"
 mkdir -p "${PLUGIN_JAR_DIR}" "${BUNDLE_LIB_DIR}"
 cp "${ROOT}"/src/fprime_yamcs/yamcs/target/fprime-yamcs-*.jar "${PLUGIN_JAR_DIR}/"
 
-mvn -B -C -f "${POM}" -Dyamcs.skip=true dependency:copy-dependencies \
+mvn -B -C -f "${POM}" dependency:copy-dependencies \
     -DincludeScope=runtime -DoutputDirectory="${BUNDLE_LIB_DIR}"
 
 echo "[INFO] Plugin jar: $(ls "${PLUGIN_JAR_DIR}")"
