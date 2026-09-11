@@ -35,7 +35,7 @@ import webbrowser
 import yaml
 
 from importlib.resources import files
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
 from fprime_gds.executables.cli import ConfigDrivenParser, DictionaryParser, BinaryDeployment, LogDeployParser, ParserBase, PluginArgumentParser
@@ -50,6 +50,30 @@ from fprime_yamcs.java import (
     find_java,
     yamcs_launch_command,
 )
+
+# AES-256 key length required by YAMCS's SecurityAssociationAes256Gcm128 and F Prime's Svc.Ccsds.AesGcm* components
+SDLS_AES_256_KEY_SIZE = 32
+SDLS_AES_256_GCM_FACTORY = "org.yamcs.security.sdls.SecurityAssociationAes256Gcm128Factory"
+
+
+def sdls_encryption_config(key_file: Path, spi: int) -> Dict[str, Any]:
+    """ Build the YAMCS SDLS security association configuration for a TM or TC frame link
+
+    F Prime's Svc.Ccsds.AesGcmEncryptor uses a random IV per frame rather than a counter, so anti-replay
+    sequence-number verification is left disabled (the YAMCS default).
+
+    Args:
+        key_file: Path to the 32-byte AES-256 key shared with the deployment
+        spi: SDLS security parameter index of the security association
+    Returns:
+        A single "encryption" list entry for a org.yamcs.tctm.ccsds.*FrameLink
+    """
+    return {
+        "spi": spi,
+        "class": SDLS_AES_256_GCM_FACTORY,
+        "args": {"keyFile": str(key_file.absolute())},
+    }
+
 
 class YamcsParser(ParserBase):
     """Parser for YAMCS specific arguments"""
@@ -137,6 +161,22 @@ class YamcsParser(ParserBase):
                 "help": "Specify the UDP port for re-injecting split telemetry channel packets into YAMCS. "
                         "Default: %(default)s",
             },
+            ("--yamcs-sdls-key-file",): {
+                "action": "store",
+                "default": None,
+                "type": Path,
+                "metavar": "FILE",
+                "help": "32-byte AES-256 key file shared with the deployment's Svc.Ccsds.SdlsFileKeyManager. When set, "
+                        "YAMCS decrypts TM and encrypts TC with SDLS AES-256-GCM (Svc.Ccsds.AesGcmEncryptor/Decryptor). "
+                        "Default: SDLS disabled (clear-text frames).",
+            },
+            ("--yamcs-sdls-spi",): {
+                "action": "store",
+                "default": 1,
+                "type": int,
+                "help": "SDLS security parameter index (SA) used for TM and TC. Must match the deployment's SdlsSaRouter "
+                        "map entry for the AES-GCM encryptor/decryptor. Default: %(default)s",
+            },
         }
 
     def handle_arguments(self, args, **kwargs):
@@ -166,6 +206,15 @@ class YamcsParser(ParserBase):
             if plugin_jar.is_dir() and not sorted(plugin_jar.glob("*.jar")):
                 print(f"[WARNING] YAMCS plugin jar directory {plugin_jar} contains no *.jar files.",
                       file=sys.stderr)
+        if args.yamcs_sdls_key_file is not None:
+            if not args.yamcs_sdls_key_file.is_file():
+                raise Exception(f"[ERROR] SDLS key file {args.yamcs_sdls_key_file} is not a file.")
+            key_size = args.yamcs_sdls_key_file.stat().st_size
+            if key_size != SDLS_AES_256_KEY_SIZE:
+                raise Exception(f"[ERROR] SDLS key file {args.yamcs_sdls_key_file} is {key_size} bytes; "
+                                f"AES-256-GCM requires exactly {SDLS_AES_256_KEY_SIZE} bytes.")
+            if not 0 < args.yamcs_sdls_spi <= 0xFFFF:
+                raise Exception(f"[ERROR] SDLS SPI {args.yamcs_sdls_spi} must be in the range 1-65535.")
         return args
 
 def yamcs_instances(config_directory: Path) -> List[str]:
@@ -322,7 +371,7 @@ def anchor_relative_mdb_paths(instance_config: dict, base_directory: Path) -> bo
     return changed
 
 
-def construct_temporary_configuration(config_directory: Path, instances: List[str], dictionary: Path, uplink_port: int, downlink_port: int, tm_inject_port: int, realtime_only_channels: List[str]) -> Tuple[Path, str]:
+def construct_temporary_configuration(config_directory: Path, instances: List[str], dictionary: Path, uplink_port: int, downlink_port: int, tm_inject_port: int, realtime_only_channels: List[str], sdls_key_file: Optional[Path] = None, sdls_spi: int = 1) -> Tuple[Path, str]:
     """ Construct a temporary YAMCS configuration directory
 
     The YAMCS configuration that ships with fprime-yamcs needs to be modified in several specific ways before running
@@ -332,6 +381,7 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
         3. Updating the TM/TC processors to use the correct dictionary constants
         4. Marking realtime-only telemetry channels as "do not archive" and switching the parameter
            archive to backfilling so those channels never reach the archives
+        5. Optionally enabling SDLS AES-256-GCM decryption (TM) and encryption (TC) on the frame links
     Args:
         config_directory: The YAMCS configuration directory to use as a base for the temporary configuration
         instances: A list of YAMCS instance names to consider for configuration
@@ -340,6 +390,8 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
         downlink_port: The UDP port to use for downlink (TM) communication with YAMCS
         tm_inject_port: The UDP port to use for re-injecting split telemetry channel packets
         realtime_only_channels: Telemetry channel name patterns to keep realtime-only (not archived)
+        sdls_key_file: 32-byte AES-256 key file enabling SDLS on the TM/TC frame links, or None to leave frames clear-text
+        sdls_spi: SDLS security parameter index to use when sdls_key_file is set
     Returns:
         The path to the temporary YAMCS configuration directory and the fprime identified instance
     """
@@ -388,6 +440,11 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
                     vc.setdefault("packetPreprocessorArgs", {})["doNotArchiveChannelIds"] = realtime_only_ids
                 if realtime_only_packet_ids:
                     vc.setdefault("packetPreprocessorArgs", {})["doNotArchivePacketIds"] = realtime_only_packet_ids
+                if sdls_key_file is not None:
+                    vc["encryptionSpis"] = [sdls_spi]
+            if sdls_key_file is not None:
+                print(f"[INFO] Enabling SDLS AES-256-GCM decryption (SPI {sdls_spi}) for TM link {link.get('name', '')}")
+                link["encryption"] = [sdls_encryption_config(sdls_key_file, sdls_spi)]
         elif link.get("class", "") == "org.yamcs.tctm.UdpTmDataLink":
             print(f"[INFO] Setting split telemetry injection port for TM link {link.get('name', '')} to {tm_inject_port}")
             link["port"] = tm_inject_port
@@ -396,10 +453,15 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
             if realtime_only_packet_ids:
                 link.setdefault("packetPreprocessorArgs", {})["doNotArchivePacketIds"] = realtime_only_packet_ids
         elif link.get("class", "") == "org.yamcs.tctm.ccsds.UdpTcFrameLink":
-            print(f"[INFO] Setting downlink port for TM link {link.get('name', '')} to {downlink_port}")
+            print(f"[INFO] Setting uplink port for TC link {link.get('name', '')} to {uplink_port}")
             link["port"] = uplink_port
             link["maxFrameLength"] = constants[0]
             link["spacecraftId"] = constants[1]
+            if sdls_key_file is not None:
+                print(f"[INFO] Enabling SDLS AES-256-GCM encryption (SPI {sdls_spi}) for TC link {link.get('name', '')}")
+                link["encryption"] = [sdls_encryption_config(sdls_key_file, sdls_spi)]
+                for vc in link.get("virtualChannels", []):
+                    vc["encryptionSpi"] = sdls_spi
     if realtime_only_ids:
         print(f"[INFO] Keeping {len(realtime_only_ids)} telemetry channels "
               f"and {len(realtime_only_packet_ids)} telemetry packets realtime-only (not archived)")
@@ -465,6 +527,23 @@ def launch_browser(parsed_args):
             webbrowser.open(ui_url, new=0, autoraise=True)
 
     threading.Thread(target=poll_and_open, daemon=True).start()
+
+
+def launch_sdls_app(parsed_args):
+    """ Launch the deployment binary, passing the SDLS key file alongside the default -p/-a arguments
+
+    Mirrors fprime-gds's default application arguments and appends "-k <key file>" so the deployment's
+    Svc.Ccsds.SdlsFileKeyManager reads the same key YAMCS uses. Explicit --application-arguments win.
+
+    Args:
+        parsed_args: parsed argument namespace
+    Return:
+        launched process
+    """
+    if parsed_args.application_arguments is None:
+        parsed_args.application_arguments = ["-p", str(parsed_args.port), "-a", parsed_args.address,
+                                             "-k", str(parsed_args.yamcs_sdls_key_file.absolute())]
+    return launch_app(parsed_args)
 
 
 def launch_yamcs(parsed_args):
@@ -555,11 +634,12 @@ def main():
         if not instances:
             raise Exception(f"No YAMCS instances found in {parsed_args.yamcs_config_dir / 'etc/yamcs.yaml'}")
 
-        yamcs_config_dir, fprime_instance = construct_temporary_configuration(parsed_args.yamcs_config_dir, instances, parsed_args.dictionary, parsed_args.udp_uplink_port, parsed_args.udp_downlink_port, parsed_args.udp_tm_inject_port, parsed_args.yamcs_realtime_only_channels)
+        yamcs_config_dir, fprime_instance = construct_temporary_configuration(parsed_args.yamcs_config_dir, instances, parsed_args.dictionary, parsed_args.udp_uplink_port, parsed_args.udp_downlink_port, parsed_args.udp_tm_inject_port, parsed_args.yamcs_realtime_only_channels, parsed_args.yamcs_sdls_key_file, parsed_args.yamcs_sdls_spi)
         parsed_args.yamcs_config_dir = yamcs_config_dir
         if parsed_args.yamcs_events_instance is None:
             parsed_args.yamcs_events_instance = fprime_instance
-        launched_apps = [launch_app] if parsed_args.app is not None else []
+        app_launcher = launch_app if parsed_args.yamcs_sdls_key_file is None else launch_sdls_app
+        launched_apps = [app_launcher] if parsed_args.app is not None else []
         processes = [launcher(parsed_args) for launcher in launched_apps + [launch_yamcs]]
         if parsed_args.gui == "html":
             launch_browser(parsed_args)

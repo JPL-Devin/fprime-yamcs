@@ -42,6 +42,12 @@ The YAMCS web interface gains an **F´ Events** page (sidebar item, served at `/
 
 This works because the event processor publishes each event with structured `extra` fields (`fprime_severity`, `fprime_event_id`, `fprime_event_name`) preserving the full 7-level F Prime severity set, which YAMCS's native 5-level severity model cannot represent. The page is registered by the `FprimeEventsWebExtension` YAMCS plugin bundled with the YAMCS project that `fprime-yamcs` builds; no additional configuration is required. Events published by older versions of the event processor (without the `extra` fields) are shown with a best-effort severity derived from the YAMCS severity.
 
+### Data-Flow Orb
+
+Every YAMCS web page also gains the data-flow indicator F Prime developers know from the `fprime-gds` main screen: an orb in the top toolbar (left of STORAGE) that glows green while telemetry or events are flowing and turns into a red X once neither has been seen for 5 seconds (the same timeout `fprime-gds` uses). Hovering the orb shows a per-source breakdown (telemetry vs. events); the orb is grey while no YAMCS instance is selected.
+
+Telemetry flow is detected from the selected processor's TM statistics stream (received-packet count deltas), and event flow from the instance's event stream, so the orb reflects live downlink activity regardless of which page is open.
+
 ## fprime-yamcs-tlmchan: Telemetry Channel Splitter
 
 `Svc.TlmChan` packs multiple (id, time, value) telemetry channel records into a single downlinked packet, but the generated XTCE models one channel per packet keyed on the first channel id — so YAMCS alone only decodes the first record of each packet.
@@ -100,6 +106,21 @@ mdb:
 ```
 
 This is to allow for automatic dictionary generation. Users declining this service must specify: `--no-convert-dictionary`.
+
+## SDLS Encryption (AES-256-GCM)
+
+SDLS is off by default: frames are clear-text unless a key file is supplied. Deployments built on the
+`Svc.ComCcsdsSdls` subtopology with `Svc.Ccsds.AesGcmEncryptor`/`AesGcmDecryptor` enable it with:
+
+```sh
+fprime-yamcs --yamcs-sdls-key-file path/to/sdls.key [--yamcs-sdls-spi 1]
+```
+
+The key file must hold exactly 32 bytes (AES-256) and be the same file read by the deployment's
+`Svc.Ccsds.SdlsFileKeyManager`. When set, the generated YAMCS configuration decrypts TM and encrypts TC with
+`org.yamcs.security.sdls.SecurityAssociationAes256Gcm128Factory` on the given SPI (default 1, matching the
+F Prime `SdlsSaRouter` default map), and the deployment binary is launched with `-k <key file>` in addition to
+the usual `-p`/`-a` arguments (override with `--application-arguments`).
 
 ## Web Extensions
 

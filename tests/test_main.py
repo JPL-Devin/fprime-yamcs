@@ -31,6 +31,8 @@ def make_args(tmp_path, **overrides):
         "yamcs_config_dir": tmp_path,
         "yamcs_web_extension_dirs": [],
         "yamcs_plugin_jars": [],
+        "yamcs_sdls_key_file": None,
+        "yamcs_sdls_spi": 1,
     }
     values.update(overrides)
     return Namespace(**values)
