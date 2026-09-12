@@ -28,15 +28,19 @@ a `java` command on the `PATH` of the Python environment. On other platforms it 
 
 Install this package and run `fprime-yamcs` on a compatible F Prime deployment.
 
-`fprime-yamcs` accepts the F Prime GDS communication adapter options (`--communication-selection` and the selected adapter's flags). The default, `udp`, expects the deployment to exchange UDP datagrams with the YAMCS links directly. Any other adapter (`ip`, `uart`, or an installed adapter plugin) makes the launcher start [`fprime-yamcs-comm`](#fprime-yamcs-comm-communication-bridge) automatically with the same adapter options, bridging the endpoint to the YAMCS UDP links. For example, a deployment using `Drv.TcpClient` (like the F Prime `Ref` deployment) is served with:
+`fprime-yamcs` accepts the F Prime GDS communication adapter options (`--communication-selection` and the selected adapter's flags) and is a drop-in replacement for `fprime-gds` on the CCSDS TM/TC path. The default adapter is `tcp-fast-server` on port 50000, exactly as `fprime-gds` serves a `Drv.TcpClient` deployment: the launcher starts [`fprime-yamcs-comm`](#fprime-yamcs-comm-communication-bridge) automatically, which aggregates the TCP byte stream into complete TM transfer frames (`tm-frame-aggregator`, sized from the dictionary) and forwards them to the YAMCS UDP links. Any other non-`udp` adapter (`tcp-fast-client`, `ip`, `uart`, or an installed adapter plugin) is bridged the same way with its own flags forwarded. From the F Prime `Ref` deployment directory:
 
 ```
-fprime-yamcs --dictionary build-artifacts/Linux/Ref/dict/RefTopologyDictionary.json \
-    --communication-selection ip --ip-port 50050
+fprime-yamcs --dictionary build-artifacts/Linux/Ref/dict/RefTopologyDictionary.json
 ```
+
+Selecting `--communication-selection udp` expects the deployment to exchange UDP datagrams with the YAMCS links directly; no bridge is started.
 
 > [!NOTE]
-> The `ip` adapter binds both TCP and UDP on `--ip-port`, so it must differ from the YAMCS UDP ports (`--udp-downlink-port` 50000, `--udp-uplink-port` 50001, `--udp-tm-inject-port` 50002 by default). The launcher refuses colliding ports. The deployment binary (`--app`) is launched with `-a`/`-p` matching `--ip-address`/`--ip-port`.
+> TCP port 50000 (`--tcp-fast-port`) and the YAMCS UDP ports (`--udp-downlink-port` 50000, `--udp-uplink-port` 50001, `--udp-tm-inject-port` 50002 by default) do not conflict: TCP and UDP port numbers are independent. The legacy `ip` adapter binds both TCP and UDP on `--ip-port`, so it must differ from the YAMCS UDP ports (e.g. `--communication-selection ip --ip-port 50050`); the launcher refuses colliding ports. The deployment binary (`--app`) is launched with `-a`/`-p` matching the serving adapter (`--tcp-fast-address`/`--tcp-fast-port` or `--ip-address`/`--ip-port`).
+
+> [!IMPORTANT]
+> The bridge defaults require the `tcp-fast-server` and `tm-frame-aggregator` plugins from `fprime-gds` `devel` (nasa/fprime-gds#352 and #353), not yet in a released `fprime-gds`; install it with `pip install "fprime-gds @ git+https://github.com/nasa/fprime-gds@devel"` until a release containing both is published. Framing plugins other than the CCSDS TM/TC path are not supported by the launcher.
 
 ## fprime-yamcs-events: Event Processor
 
@@ -66,21 +70,28 @@ Telemetry flow is detected from the selected processor's TM statistics stream (r
 
 ## fprime-yamcs-comm: Communication Bridge
 
-`fprime-yamcs-comm` bridges bidirectional communication between an F Prime endpoint and the YAMCS UDP intake/outlet. `fprime-yamcs` starts it automatically whenever a communication adapter other than `udp` is selected (forwarding the adapter options and the configured YAMCS UDP ports, with the default `no-op` framing); run it directly when operating YAMCS without the full launcher.
+`fprime-yamcs-comm` bridges bidirectional communication between an F Prime endpoint and the YAMCS UDP intake/outlet. `fprime-yamcs` starts it automatically whenever a communication adapter other than `udp` is selected (forwarding the adapter options, the dictionary, and the configured YAMCS UDP ports, with `tm-frame-aggregator` framing); run it directly when operating YAMCS without the full launcher.
 
-- The endpoint side is reached through an F Prime GDS **communication adapter plugin** (`--communication-selection`: `uart`, `ip`, or any installed adapter plugin).
+- The endpoint side is reached through an F Prime GDS **communication adapter plugin** (`--communication-selection`: `tcp-fast-server` by default on `--tcp-fast-port` 50000, or `tcp-fast-client`, `uart`, `ip`, or any installed adapter plugin).
 - The YAMCS side pushes deframed packets as UDP datagrams to the telemetry intake (`--tm-host`/`--tm-port`, default `127.0.0.1:50000`) and receives command datagrams on a local UDP port (`--tc-host`/`--tc-port`, default `127.0.0.1:50001`). Command datagrams are only accepted from the TM host, loopback (`127.0.0.1`), and any hosts supplied via `--tc-allowed-source`; hostnames are resolved to IPv4 addresses once at startup and compared against the datagram source IP.
-- One stage of framing/deframing sits in between, provided by an F Prime GDS **framing plugin** (`--framing-selection`). The default is the packaged `no-op` framer/deframer, which passes data through unchanged since YAMCS nominally performs framing/deframing itself. Select `fprime` to apply the standard F Prime framing (start word, length, data, checksum) on the endpoint side.
+- One stage of framing/deframing sits in between, provided by an F Prime GDS **framing plugin** (`--framing-selection`). The default, `tm-frame-aggregator`, reassembles the endpoint byte stream into complete fixed-size CCSDS TM transfer frames (one per UDP datagram) and passes TC frames through unchanged, since YAMCS performs the CCSDS framing/deframing itself. It needs the frame size and spacecraft ID: pass `--dictionary <F Prime JSON dictionary>` (read from `ComCfg.TmFrameFixedSize`/`ComCfg.SpacecraftId`; the launcher forwards its own dictionary) or `--frame-size`/`--scid` explicitly. Select `no-op` to pass data through unchanged, or `fprime` for the standard F Prime framing (start word, length, data, checksum).
 
 > [!NOTE]
 > The UDP-transport requirement described under [Caveats](#caveats) applies to connecting F Prime directly to YAMCS; `fprime-yamcs-comm` lifts it by bridging non-UDP endpoints (e.g. UART) to the YAMCS UDP links.
 
 > [!WARNING]
-> With `no-op` framing over a stream-oriented adapter (`uart`, `ip`), packet boundaries depend on read timing: packets may be split or merged across UDP datagrams. Use a boundary-recovering framing plugin (e.g. `--framing-selection fprime`) unless the endpoint stream carries self-delimiting data that YAMCS deframes. The bridge warns on startup for the built-in stream adapters only; third-party stream adapters are not detected.
+> With `no-op` framing over a stream-oriented adapter (`tcp-fast-server`, `tcp-fast-client`, `uart`, `ip`), packet boundaries depend on read timing: packets may be split or merged across UDP datagrams. Use a boundary-recovering framing plugin (e.g. `--framing-selection tm-frame-aggregator`) unless the endpoint stream carries self-delimiting data that YAMCS deframes. The bridge warns on startup for the built-in stream adapters only; third-party stream adapters are not detected.
 
 Operational notes: the bridge exits with a non-zero code if either data pump fails abnormally, so supervisors can detect and restart it; buffered downlink data that the framing plugin cannot deframe is discarded (with a warning) once it exceeds ten maximum-size datagrams (~640 KB).
 
-Example, bridging a UART device to YAMCS with F Prime framing recovering packet boundaries (all UDP flags shown use their default values):
+Example, serving a `Drv.TcpClient` deployment on TCP port 50000 with TM frames sized from the dictionary (all UDP flags shown use their default values):
+
+```
+fprime-yamcs-comm --dictionary build-artifacts/Linux/Ref/dict/RefTopologyDictionary.json \
+    --tm-host 127.0.0.1 --tm-port 50000 --tc-port 50001
+```
+
+Example, bridging a UART device to YAMCS with F Prime framing recovering packet boundaries:
 
 ```
 fprime-yamcs-comm --communication-selection uart --uart-device /dev/ttyUSB0 --uart-baud 115200 \
@@ -91,12 +102,12 @@ fprime-yamcs-comm --communication-selection uart --uart-device /dev/ttyUSB0 --ua
 flowchart LR
     subgraph COMM["fprime-yamcs-comm"]
         ADPT["Comm Adapter Plugin<br/>(--communication-selection)"]
-        FRAME["Framing Plugin<br/>(--framing-selection, default no-op)"]
+        FRAME["Framing Plugin<br/>(--framing-selection, default tm-frame-aggregator)"]
         UDP["YAMCS UDP Endpoints<br/>(TM out / TC in)"]
         ADPT <--> FRAME
         FRAME <--> UDP
     end
-    EP["F´ Endpoint<br/>(UART, IP, ...)"] <--> ADPT
+    EP["F´ Endpoint<br/>(TCP, UART, ...)"] <--> ADPT
     UDP <--> YAMCS["YAMCS UDP intake/outlet"]
 ```
 
@@ -184,7 +195,7 @@ my_plugin = "my_package:PLUGIN_JAR"
 
 ## Caveats
 
-Currently, the default configuration of YAMCS requires F Prime to connect a CCSDS TC/TM framer/deframer to the Drv.Udp component ensuring that UDP is the transport mechanism, unless a non-`udp` communication adapter is selected so that `fprime-yamcs-comm` bridges the endpoint to the YAMCS UDP links.
+Currently, the default configuration of YAMCS requires F Prime to connect a CCSDS TC/TM framer/deframer to the Drv.Udp component ensuring that UDP is the transport mechanism, unless a non-`udp` communication adapter is selected (the default `tcp-fast-server`, `uart`, ...) so that `fprime-yamcs-comm` bridges the endpoint to the YAMCS UDP links.
 
 ```mermaid id="th4eai"
 flowchart LR

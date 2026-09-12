@@ -10,6 +10,7 @@ import os
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -260,6 +261,115 @@ class TestBridgeFlow:
         assert read_available(peer_fd, minimum=len(expected)) == expected
 
 
+TM_FRAME_SIZE = 64
+TM_SCID = 0x44
+
+
+def make_tm_frame(mc_count=0, fill=0xAB):
+    """Build a fixed-size CCSDS TM frame as Svc::Ccsds::TmFramer emits it (trailer arbitrary)"""
+    global_vcid = (TM_SCID & 0x3FF) << 4
+    data_field_status = 0x3 << 11
+    header = struct.pack(">HBBH", global_vcid, mc_count, mc_count, data_field_status)
+    return header + bytes([fill]) * (TM_FRAME_SIZE - len(header) - 2) + b"\xCC\xCC"
+
+
+def unused_tcp_port():
+    """Reserve a TCP port number"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        return reservation.getsockname()[1]
+
+
+@pytest.fixture
+def tcp_bridge_setup(unused_udp_ports):
+    """Run the bridge with its default adapter/framing (tcp-fast-server, tm-frame-aggregator)"""
+    tm_port, tc_port = unused_udp_ports
+    tcp_port = unused_tcp_port()
+    tm_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tm_socket.bind(("127.0.0.1", tm_port))
+    tm_socket.settimeout(TIMEOUT)
+    tc_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    bridge = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "fprime_yamcs.comm",
+            "--tcp-fast-port",
+            str(tcp_port),
+            "--frame-size",
+            str(TM_FRAME_SIZE),
+            "--scid",
+            str(TM_SCID),
+            "--tm-port",
+            str(tm_port),
+            "--tc-port",
+            str(tc_port),
+        ],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stderr_lines = []
+    reader = threading.Thread(
+        target=lambda: stderr_lines.extend(iter(bridge.stderr.readline, "")),
+        daemon=True,
+    )
+    reader.start()
+    assert wait_for_line(stderr_lines, "Bridge up"), "Bridge failed to start"
+    assert bridge.poll() is None, "Bridge process exited prematurely"
+    peer = socket.create_connection(("127.0.0.1", tcp_port), timeout=TIMEOUT)
+    peer.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    yield peer, tm_socket, tc_socket, tc_port, stderr_lines
+    bridge.send_signal(signal.SIGINT)
+    bridge.wait(timeout=TIMEOUT)
+    reader.join(timeout=TIMEOUT)
+    peer.close()
+    tm_socket.close()
+    tc_socket.close()
+
+
+class TestDefaultTcpBridgeFlow:
+    """Integration tests for the default topology: TCP endpoint -> TM frame aggregator -> YAMCS UDP"""
+
+    def test_defaults_selected(self, tcp_bridge_setup):
+        """The bridge must report the tcp-fast-server and tm-frame-aggregator defaults, without the no-op warning"""
+        _, _, _, _, stderr_lines = tcp_bridge_setup
+        assert any("tcp-fast-server" in line and "tm-frame-aggregator" in line for line in stderr_lines)
+        assert not any("cannot preserve" in line for line in stderr_lines)
+
+    def test_frames_reassembled_from_stream(self, tcp_bridge_setup):
+        """Frames split and merged across TCP writes must each arrive as one UDP datagram"""
+        peer, tm_socket, _, _, _ = tcp_bridge_setup
+        frames = [make_tm_frame(mc_count=count, fill=0xA0 + count) for count in range(3)]
+        stream = b"".join(frames)
+        # Split at points unrelated to frame boundaries, pausing so reads see the partial data
+        for start, end in ((0, 10), (10, 70), (70, 150), (150, len(stream))):
+            peer.sendall(stream[start:end])
+            time.sleep(0.1)
+        received = [tm_socket.recvfrom(65507)[0] for _ in frames]
+        assert received == frames
+
+    def test_leading_garbage_discarded(self, tcp_bridge_setup):
+        """Bytes preceding a frame header must be discarded, not forwarded"""
+        peer, tm_socket, _, _, stderr_lines = tcp_bridge_setup
+        frame = make_tm_frame()
+        peer.sendall(b"\xFF\xFE\xFD" + frame)
+        assert tm_socket.recvfrom(65507)[0] == frame
+        assert wait_for_line(stderr_lines, "Discarded 3 bytes")
+
+    def test_udp_to_tcp_passthrough(self, tcp_bridge_setup):
+        """YAMCS TC datagrams must reach the TCP endpoint unchanged"""
+        peer, _, tc_socket, tc_port, _ = tcp_bridge_setup
+        command = bytes(range(48))
+        tc_socket.sendto(command, ("127.0.0.1", tc_port))
+        received = b""
+        while len(received) < len(command):
+            chunk = peer.recv(4096)
+            assert chunk, "TCP endpoint closed before the command arrived"
+            received += chunk
+        assert received == command
+
+
 class TestYamcsUdpSources:
     """Unit tests for TC source resolution and filtering"""
 
@@ -374,13 +484,37 @@ class TestCliValidation:
     @pytest.mark.parametrize("flag,value", [("--tm-port", "0"), ("--tc-port", "70000")])
     def test_invalid_port_rejected(self, flag, value):
         result = subprocess.run(
-            [sys.executable, "-m", "fprime_yamcs.comm", flag, value],
+            [sys.executable, "-m", "fprime_yamcs.comm", "--tcp-fast-port", str(unused_tcp_port()), flag, value],
             capture_output=True,
             text=True,
             timeout=TIMEOUT * 3,
         )
         assert result.returncode != 0
         assert "Invalid UDP port" in result.stderr
+
+    def test_missing_dictionary_rejected(self, tmp_path):
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "fprime_yamcs.comm",
+                "--tcp-fast-port", str(unused_tcp_port()), "--dictionary", str(tmp_path / "missing.json"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT * 3,
+        )
+        assert result.returncode != 0
+        assert "does not exist" in result.stderr
+
+    def test_unknown_frame_size_rejected(self):
+        """Without a dictionary or --frame-size the default aggregator cannot be configured"""
+        result = subprocess.run(
+            [sys.executable, "-m", "fprime_yamcs.comm", "--tcp-fast-port", str(unused_tcp_port())],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT * 3,
+        )
+        assert result.returncode != 0
+        assert "Failed to configure 'tm-frame-aggregator' framing" in result.stderr
 
     def test_unresolvable_host_rejected(self, monkeypatch):
         """Host resolution failures must surface as OSError (main exits 1 on it)"""

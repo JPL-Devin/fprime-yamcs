@@ -39,8 +39,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
 from fprime_gds.executables.cli import ConfigDrivenParser, DictionaryParser, BinaryDeployment, LogDeployParser, ParserBase, PluginArgumentParser
-from fprime_gds.executables.run_deployment import BASE_MODULE_ARGUMENTS, launch_app, launch_process
+from fprime_gds.executables.run_deployment import BASE_MODULE_ARGUMENTS, app_connection, launch_app, launch_process
 from fprime_gds.plugin.system import Plugins
+
+from fprime_yamcs.comm import DEFAULT_COMMUNICATION, DEFAULT_FRAMING
 
 from fprime_yamcs.java import (
     JavaResolutionException,
@@ -58,6 +60,9 @@ SDLS_AES_256_GCM_FACTORY = "org.yamcs.security.sdls.SecurityAssociationAes256Gcm
 
 # Communication adapters whose deployments exchange UDP datagrams with YAMCS directly, needing no bridge
 DIRECT_COMMUNICATION_SELECTIONS = {"udp", "none"}
+
+# The launcher only selects the communication adapter; framing is fixed to the bridge default
+LAUNCHER_PLUGIN_CATEGORIES = ["communication"]
 
 
 def sdls_encryption_config(key_file: Path, spi: int) -> Dict[str, Any]:
@@ -80,9 +85,9 @@ def sdls_encryption_config(key_file: Path, spi: int) -> Dict[str, Any]:
 
 
 class YamcsPluginArgumentParser(PluginArgumentParser):
-    """Plugin parser defaulting to direct UDP communication with YAMCS"""
+    """Plugin parser defaulting to the bridge's TCP server, as fprime-gds serves TCP deployments"""
 
-    FPRIME_CHOICES = {**PluginArgumentParser.FPRIME_CHOICES, "communication": "udp"}
+    FPRIME_CHOICES = {**PluginArgumentParser.FPRIME_CHOICES, "communication": DEFAULT_COMMUNICATION}
 
 
 def needs_comm_bridge(communication_selection: str) -> bool:
@@ -120,17 +125,18 @@ def check_comm_bridge_ports(parsed_args):
 def comm_bridge_arguments(parsed_args) -> List[str]:
     """ Build the fprime-yamcs-comm command line arguments matching the launcher's arguments
 
-    Reproduces the communication plugin selection and options as supplied to the launcher, then points the bridge's
-    YAMCS side at the configured TM (downlink) and TC (uplink) UDP ports. Framing is left at the bridge default (no-op)
-    since YAMCS performs CCSDS deframing itself.
+    Reproduces the communication plugin selection and options as supplied to the launcher, selects the TM frame
+    aggregating framer fed by the launcher's dictionary (frame size and spacecraft ID), and points the bridge's YAMCS
+    side at the configured TM (downlink) and TC (uplink) UDP ports.
 
     Args:
         parsed_args: parsed argument namespace
     Returns:
         argument list for fprime-yamcs-comm
     """
-    communication_arguments = PluginArgumentParser(Plugins(["communication"])).reproduce_cli_args(parsed_args)
+    communication_arguments = PluginArgumentParser(Plugins(LAUNCHER_PLUGIN_CATEGORIES)).reproduce_cli_args(parsed_args)
     return communication_arguments + [
+        "--framing-selection", DEFAULT_FRAMING, "--dictionary", str(Path(parsed_args.dictionary).resolve()),
         "--tm-host", "127.0.0.1", "--tm-port", str(parsed_args.udp_downlink_port),
         "--tc-host", "127.0.0.1", "--tc-port", str(parsed_args.udp_uplink_port),
     ]
@@ -606,6 +612,19 @@ def launch_browser(parsed_args):
     threading.Thread(target=poll_and_open, daemon=True).start()
 
 
+def launch_deployment_app(parsed_args):
+    """ Launch the deployment binary connecting to the selected communication adapter
+
+    Mirrors fprime-gds: the -p/-a arguments come from the adapter hosting the deployment (tcp-fast-server, ip).
+
+    Args:
+        parsed_args: parsed argument namespace
+    Return:
+        launched process
+    """
+    return launch_app(parsed_args, app_connection(parsed_args))
+
+
 def launch_sdls_app(parsed_args):
     """ Launch the deployment binary, passing the SDLS key file alongside the default -p/-a arguments
 
@@ -617,10 +636,12 @@ def launch_sdls_app(parsed_args):
     Return:
         launched process
     """
-    if parsed_args.application_arguments is None:
-        parsed_args.application_arguments = ["-p", str(parsed_args.port), "-a", parsed_args.address,
+    connection = app_connection(parsed_args)
+    if parsed_args.application_arguments is None and connection is not None:
+        address, port = connection
+        parsed_args.application_arguments = ["-p", str(port), "-a", address,
                                              "-k", str(parsed_args.yamcs_sdls_key_file.absolute())]
-    return launch_app(parsed_args)
+    return launch_app(parsed_args, connection)
 
 
 def launch_yamcs(parsed_args):
@@ -693,6 +714,7 @@ def parse_args():
             Path(os.environ["FPRIME_GDS_CONFIG_PATH"])
         )
     # Parse the arguments, and refine through all handlers
+    Plugins.system(LAUNCHER_PLUGIN_CATEGORIES)
     args, _ = ConfigDrivenParser.parse_args(
         argument_handlers, "Run F prime deployment and GDS"
     )
@@ -720,7 +742,7 @@ def main():
         parsed_args.yamcs_config_dir = yamcs_config_dir
         if parsed_args.yamcs_events_instance is None:
             parsed_args.yamcs_events_instance = fprime_instance
-        app_launcher = launch_app if parsed_args.yamcs_sdls_key_file is None else launch_sdls_app
+        app_launcher = launch_deployment_app if parsed_args.yamcs_sdls_key_file is None else launch_sdls_app
         launched_apps = [app_launcher] if parsed_args.app is not None else []
         processes = [launcher(parsed_args) for launcher in launched_bridges + launched_apps + [launch_yamcs]]
         if parsed_args.gui == "html":
