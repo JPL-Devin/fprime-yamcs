@@ -36,7 +36,6 @@ from fprime_yamcs.__main__ import (
     comm_bridge_arguments,
     launch_comm_bridge,
     launch_deployment_app,
-    launch_sdls_app,
     launch_yamcs_maven,
     needs_comm_bridge,
 )
@@ -222,21 +221,16 @@ class TestCommBridgeAutostart:
             launch_deployment_app(args)
         assert launch.call_args.args == (args, expected)
 
-    @pytest.mark.parametrize("argv, expected", [
-        ([], ["-p", "50000", "-a", "127.0.0.1"]),
-        (["--communication-selection", "udp"], ["-p", "50000", "-a", "0.0.0.0"]),
-        (["--communication-selection", "udp", "--ip-address", "192.168.1.5", "--ip-port", "50050"],
-         ["-p", "50050", "-a", "192.168.1.5"]),
-    ])
-    def test_sdls_app_always_receives_key_file(self, tmp_path, argv, expected):
-        """The -k key argument is passed for every adapter, including direct UDP where no adapter hosts the app"""
-        args = parse_comm_args(*argv)
+    def test_sdls_key_file_does_not_alter_deployment_arguments(self, tmp_path):
+        """The key file configures YAMCS only; the deployment's -k comes from --application-arguments"""
+        key_file = tmp_path / "sdls.key"
+        key_file.write_bytes(bytes(32))
+        args = parse_comm_args("--communication-selection", "udp", "--yamcs-sdls-key-file", str(key_file))
         args.application_arguments = None
-        args.yamcs_sdls_key_file = tmp_path / "sdls.key"
         with patch.object(main_module, "launch_app") as launch:
-            launch_sdls_app(args)
-        assert args.application_arguments == expected + ["-k", str(args.yamcs_sdls_key_file.absolute())]
-        assert launch.call_args.args[0] is args
+            launch_deployment_app(args)
+        assert args.application_arguments is None
+        assert launch.call_args.args == (args, None)
 
     def test_launch_runs_comm_module(self):
         args = parse_comm_args("--communication-selection", "ip", "--ip-port", "50050")

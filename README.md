@@ -140,8 +140,18 @@ fprime-yamcs --yamcs-sdls-key-file path/to/sdls.key [--yamcs-sdls-spi 1]
 The key file must hold exactly 32 bytes (AES-256) and be the same file read by the deployment's
 `Svc.Ccsds.SdlsFileKeyManager`. When set, the generated YAMCS configuration decrypts TM and encrypts TC with
 `org.yamcs.security.sdls.SecurityAssociationAes256Gcm128Factory` on the given SPI (default 1, matching the
-F Prime `SdlsSaRouter` default map), and the deployment binary is launched with `-k <key file>` in addition to
-the usual `-p`/`-a` arguments (override with `--application-arguments`).
+F Prime `SdlsSaRouter` default map).
+
+This flag configures YAMCS only. The deployment binary is launched exactly as `fprime-gds` launches it, so a
+deployment that reads its key from `-k` must be given that argument through `--application-arguments`, which
+replaces the default `-p`/`-a` arguments. The usual place is the project's `fprime-gds.yml`:
+
+```yaml
+command-line-options:
+  communication-selection: udp
+  yamcs-sdls-key-file: sdls.key
+  application-arguments: ["-p", "50000", "-a", "0.0.0.0", "-k", "sdls.key"]
+```
 
 ## Web Extensions
 
