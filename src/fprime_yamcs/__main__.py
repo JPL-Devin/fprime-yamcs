@@ -637,8 +637,8 @@ def launch_sdls_app(parsed_args):
         launched process
     """
     connection = app_connection(parsed_args)
-    if parsed_args.application_arguments is None and connection is not None:
-        address, port = connection
+    if parsed_args.application_arguments is None:
+        address, port = connection if connection is not None else (parsed_args.address, parsed_args.port)
         parsed_args.application_arguments = ["-p", str(port), "-a", address,
                                              "-k", str(parsed_args.yamcs_sdls_key_file.absolute())]
     return launch_app(parsed_args, connection)
