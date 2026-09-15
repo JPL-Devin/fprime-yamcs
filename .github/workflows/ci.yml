@@ -56,10 +56,6 @@ jobs:
           path: dist/
       - name: Install
         run: pip install dist/*.whl pytest
-      # The bridge defaults (tcp-fast-server, tm-frame-aggregator) need fprime-gds devel until a
-      # release containing nasa/fprime-gds#353 is published; drop this step and bump pyproject then
-      - name: Install fprime-gds devel
-        run: pip install "fprime-gds @ git+https://github.com/nasa/fprime-gds@06ac04afb16552b439e87e0f14753a45f63e2cb1"
       - name: Run unit tests
         run: pytest tests/
 

@@ -14,7 +14,6 @@ selected with `--framing-selection`.
 """
 
 import logging
-import os
 import signal
 import sys
 import threading
@@ -25,7 +24,6 @@ import fprime_gds.common.communication.adapters.base
 import fprime_gds.common.communication.adapters.ip
 import fprime_gds.common.communication.adapters.tcp_fast
 import fprime_gds.executables.cli
-from fprime_gds.common.models.dictionaries import Dictionaries
 from fprime_gds.plugin.system import Plugins
 
 from fprime_yamcs.comm import DEFAULT_COMMUNICATION, DEFAULT_FRAMING
@@ -95,31 +93,14 @@ class YamcsUdpParser(fprime_gds.executables.cli.ParserBase):
         return args
 
 
-class YamcsDictionaryParser(fprime_gds.executables.cli.ParserBase):
-    """Parser for an optional dictionary supplying the framing plugin's constants"""
-
-    DESCRIPTION = "Dictionary options"
-
-    def get_arguments(self) -> Dict[Tuple[str, ...], Dict[str, Any]]:
-        """Optional dictionary argument"""
-        return {
-            ("--dictionary",): {
-                "dest": "dictionary",
-                "type": str,
-                "default": None,
-                "help": "F Prime JSON dictionary supplying framing constants "
-                "(e.g. ComCfg.TmFrameFixedSize and ComCfg.SpacecraftId for "
-                "tm-frame-aggregator). Not auto-detected.",
-            },
-        }
+class YamcsDictionaryParser(fprime_gds.executables.cli.DictionaryParser):
+    """GDS dictionary parser made optional: loads only when --dictionary or --deployment is given"""
 
     def handle_arguments(self, args, **kwargs):
-        """Load the dictionary's types and constants into the global configuration"""
-        if args.dictionary is not None:
-            if not os.path.isfile(args.dictionary):
-                raise ValueError(f"Dictionary file {args.dictionary} does not exist")
-            Dictionaries.load_dictionaries_into_config(args.dictionary)
-        return args
+        """Skip dictionary detection when no dictionary source was supplied (e.g. no-op framing)"""
+        if args.dictionary is None and args.deployment is None:
+            return args
+        return super().handle_arguments(args, **kwargs)
 
 
 class YamcsPluginArgumentParser(fprime_gds.executables.cli.PluginArgumentParser):

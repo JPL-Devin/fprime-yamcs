@@ -15,11 +15,14 @@ import subprocess
 import sys
 import threading
 import time
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
 
 from fprime_gds.common.communication.framing import FpFramerDeframer
+from fprime_gds.executables.cli import DictionaryParser
+from fprime_yamcs.comm.__main__ import YamcsDictionaryParser
 from fprime_yamcs.comm.bridge import MAXIMUM_PENDING_SIZE, UdpBridge
 from fprime_yamcs.comm.framing import NoOpFramerDeframer
 from fprime_yamcs.comm.udp import YamcsUdp
@@ -515,6 +518,18 @@ class TestCliValidation:
         )
         assert result.returncode != 0
         assert "Failed to configure 'tm-frame-aggregator' framing" in result.stderr
+
+    @pytest.mark.parametrize(
+        "supplied,loads",
+        [({}, False), ({"dictionary": "dict.json"}, True), ({"deployment": "build"}, True)],
+    )
+    def test_dictionary_loaded_only_when_supplied(self, monkeypatch, supplied, loads):
+        """The GDS dictionary parser runs only when --dictionary or --deployment is given"""
+        calls = []
+        monkeypatch.setattr(DictionaryParser, "handle_arguments", lambda self, args, **kw: calls.append(args) or args)
+        args = Namespace(**{"dictionary": None, "deployment": None, **supplied})
+        assert YamcsDictionaryParser().handle_arguments(args) is args
+        assert bool(calls) == loads
 
     def test_unresolvable_host_rejected(self, monkeypatch):
         """Host resolution failures must surface as OSError (main exits 1 on it)"""
