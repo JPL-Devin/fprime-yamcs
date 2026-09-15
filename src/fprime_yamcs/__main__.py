@@ -251,6 +251,7 @@ class YamcsParser(ParserBase):
                 "metavar": "FILE",
                 "help": "32-byte AES-256 key file shared with the deployment's Svc.Ccsds.SdlsFileKeyManager. When set, "
                         "YAMCS decrypts TM and encrypts TC with SDLS AES-256-GCM (Svc.Ccsds.AesGcmEncryptor/Decryptor). "
+                        "Configures YAMCS only; pass the deployment its key via --application-arguments. "
                         "Default: SDLS disabled (clear-text frames).",
             },
             ("--yamcs-sdls-spi",): {
@@ -625,25 +626,6 @@ def launch_deployment_app(parsed_args):
     return launch_app(parsed_args, app_connection(parsed_args))
 
 
-def launch_sdls_app(parsed_args):
-    """ Launch the deployment binary, passing the SDLS key file alongside the default -p/-a arguments
-
-    Mirrors fprime-gds's default application arguments and appends "-k <key file>" so the deployment's
-    Svc.Ccsds.SdlsFileKeyManager reads the same key YAMCS uses. Explicit --application-arguments win.
-
-    Args:
-        parsed_args: parsed argument namespace
-    Return:
-        launched process
-    """
-    connection = app_connection(parsed_args)
-    if parsed_args.application_arguments is None:
-        address, port = connection if connection is not None else (parsed_args.address, parsed_args.port)
-        parsed_args.application_arguments = ["-p", str(port), "-a", address,
-                                             "-k", str(parsed_args.yamcs_sdls_key_file.absolute())]
-    return launch_app(parsed_args, connection)
-
-
 def launch_yamcs(parsed_args):
     """ Launch YAMCS """
     # Set up the environment variables required by YAMCS and fprime-yamcs
@@ -742,8 +724,7 @@ def main():
         parsed_args.yamcs_config_dir = yamcs_config_dir
         if parsed_args.yamcs_events_instance is None:
             parsed_args.yamcs_events_instance = fprime_instance
-        app_launcher = launch_deployment_app if parsed_args.yamcs_sdls_key_file is None else launch_sdls_app
-        launched_apps = [app_launcher] if parsed_args.app is not None else []
+        launched_apps = [launch_deployment_app] if parsed_args.app is not None else []
         processes = [launcher(parsed_args) for launcher in launched_bridges + launched_apps + [launch_yamcs]]
         if parsed_args.gui == "html":
             launch_browser(parsed_args)
