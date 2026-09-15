@@ -16,13 +16,31 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import sys
 from argparse import Namespace
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from fprime_gds.executables.cli import ParserBase
+from fprime_gds.plugin.system import Plugins
+
 from fprime_yamcs import __main__ as main_module
-from fprime_yamcs.__main__ import YamcsParser, anchor_relative_mdb_paths, launch_yamcs_maven
+from fprime_yamcs.__main__ import (
+    LAUNCHER_PLUGIN_CATEGORIES,
+    YamcsParser,
+    YamcsPluginArgumentParser,
+    anchor_relative_mdb_paths,
+    check_comm_bridge_ports,
+    comm_bridge_arguments,
+    launch_comm_bridge,
+    launch_deployment_app,
+    launch_yamcs_maven,
+    needs_comm_bridge,
+)
+
+DICTIONARY = Path("/deploy/dict/RefTopologyDictionary.json")
 
 
 def make_args(tmp_path, **overrides):
@@ -102,6 +120,115 @@ class TestAnchorRelativeMdbPaths:
 
     def test_no_mdb_section(self, tmp_path):
         assert anchor_relative_mdb_paths({}, tmp_path) is False
+
+
+def parse_comm_args(*argv):
+    """Parse launcher plugin and YAMCS arguments the way the launcher does, with a nominal dictionary path"""
+    Plugins.system(LAUNCHER_PLUGIN_CATEGORIES)
+    with patch.object(main_module, "discovered_web_extension_dirs", return_value=[]):
+        with patch.object(sys, "argv", ["fprime-yamcs", *argv]):
+            args, _ = ParserBase.parse_args([YamcsPluginArgumentParser, YamcsParser], "test")
+    args.dictionary = DICTIONARY
+    return args
+
+
+def contains_sequence(arguments, expected):
+    """True when the expected argument sequence appears contiguously in the arguments"""
+    return any(arguments[i:i + len(expected)] == expected for i in range(len(arguments)))
+
+
+class TestCommBridgeAutostart:
+    """The launcher bridges every communication adapter other than udp through fprime-yamcs-comm"""
+
+    def test_default_selection_is_tcp_fast_server_on_gds_port(self):
+        args = parse_comm_args()
+        assert args.communication_selection == "tcp-fast-server"
+        assert args.tcp_fast_port == 50000
+        assert needs_comm_bridge(args.communication_selection) is True
+
+    def test_udp_selection_needs_no_bridge(self):
+        args = parse_comm_args("--communication-selection", "udp")
+        assert needs_comm_bridge(args.communication_selection) is False
+
+    @pytest.mark.parametrize("selection", ["tcp-fast-server", "tcp-fast-client", "ip", "uart"])
+    def test_non_udp_selection_needs_bridge(self, selection):
+        assert needs_comm_bridge(selection) is True
+
+    def test_none_selection_needs_no_bridge(self):
+        assert needs_comm_bridge("none") is False
+
+    def test_launcher_exposes_only_communication_plugins(self):
+        args = parse_comm_args()
+        assert not hasattr(args, "framing_selection")
+
+    def test_default_bridge_arguments(self):
+        arguments = comm_bridge_arguments(parse_comm_args())
+        assert arguments[:2] == ["--communication-selection", "tcp-fast-server"]
+        for expected in (["--tcp-fast-port", "50000"],
+                         ["--framing-selection", "tm-frame-aggregator"],
+                         ["--dictionary", str(DICTIONARY)],
+                         ["--tm-host", "127.0.0.1", "--tm-port", "50000"],
+                         ["--tc-host", "127.0.0.1", "--tc-port", "50001"]):
+            assert contains_sequence(arguments, expected), expected
+
+    def test_bridge_arguments_carry_tcp_fast_options(self):
+        args = parse_comm_args("--communication-selection", "tcp-fast-client", "--tcp-fast-address", "10.0.0.7",
+                               "--tcp-fast-port", "50123", "--udp-downlink-port", "60000")
+        arguments = comm_bridge_arguments(args)
+        for expected in (["--communication-selection", "tcp-fast-client"], ["--tcp-fast-address", "10.0.0.7"],
+                         ["--tcp-fast-port", "50123"], ["--tm-port", "60000"], ["--tc-port", "50001"]):
+            assert contains_sequence(arguments, expected), expected
+
+    def test_bridge_arguments_reproduce_adapter_and_yamcs_ports(self):
+        args = parse_comm_args("--communication-selection", "ip", "--ip-port", "50050", "--ip-client",
+                               "--udp-downlink-port", "60000", "--udp-uplink-port", "60001")
+        arguments = comm_bridge_arguments(args)
+        for expected in (["--communication-selection", "ip"], ["--ip-port", "50050"], ["--ip-client"],
+                         ["--framing-selection", "tm-frame-aggregator"],
+                         ["--tm-host", "127.0.0.1", "--tm-port", "60000"],
+                         ["--tc-host", "127.0.0.1", "--tc-port", "60001"]):
+            assert contains_sequence(arguments, expected), expected
+
+    def test_bridge_arguments_carry_uart_options(self):
+        args = parse_comm_args("--communication-selection", "uart", "--uart-device", "/dev/ttyUSB3",
+                               "--uart-baud", "115200")
+        arguments = comm_bridge_arguments(args)
+        assert arguments[:2] == ["--communication-selection", "uart"]
+        assert arguments[arguments.index("--uart-device") + 1] == "/dev/ttyUSB3"
+        assert arguments[arguments.index("--uart-baud") + 1] == "115200"
+
+    def test_ip_port_colliding_with_yamcs_rejected(self):
+        args = parse_comm_args("--communication-selection", "ip", "--ip-port", "50001")
+        with pytest.raises(Exception, match="collides with YAMCS --udp-uplink-port"):
+            check_comm_bridge_ports(args)
+
+    def test_distinct_ip_port_accepted(self):
+        check_comm_bridge_ports(parse_comm_args("--communication-selection", "ip", "--ip-port", "50050"))
+
+    def test_tcp_fast_port_may_match_yamcs_udp_port(self):
+        """TCP and UDP port spaces are disjoint, so the default TCP 50000 coexists with the UDP TM intake on 50000"""
+        check_comm_bridge_ports(parse_comm_args())
+
+    @pytest.mark.parametrize("argv, expected", [
+        ([], ("127.0.0.1", 50000)),
+        (["--tcp-fast-address", "192.168.1.5", "--tcp-fast-port", "50123"], ("192.168.1.5", 50123)),
+        (["--communication-selection", "ip", "--ip-address", "192.168.1.5", "--ip-port", "50050"],
+         ("192.168.1.5", 50050)),
+    ])
+    def test_deployment_app_connects_to_hosting_adapter(self, argv, expected):
+        args = parse_comm_args(*argv)
+        with patch.object(main_module, "launch_app") as launch:
+            launch_deployment_app(args)
+        assert launch.call_args.args == (args, expected)
+
+    def test_launch_runs_comm_module(self):
+        args = parse_comm_args("--communication-selection", "ip", "--ip-port", "50050")
+        with patch.object(main_module, "launch_process") as launch:
+            launch_comm_bridge(args)
+        command = launch.call_args.args[0]
+        assert command[:4] == [sys.executable, "-u", "-m", "fprime_yamcs.comm"]
+        assert command[4:] == comm_bridge_arguments(args)
+        assert launch.call_args.kwargs["name"] == "fprime-yamcs-comm[ip]"
 
 
 class TestMavenFallback:
