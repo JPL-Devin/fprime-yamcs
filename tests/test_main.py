@@ -16,6 +16,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import json
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -34,6 +35,7 @@ from fprime_yamcs.__main__ import (
     anchor_relative_mdb_paths,
     check_comm_bridge_ports,
     comm_bridge_arguments,
+    get_dictionary_constants,
     launch_comm_bridge,
     launch_deployment_app,
     launch_yamcs_maven,
@@ -102,6 +104,29 @@ class TestHandleArguments:
         args = self.handle(make_args(tmp_path), discovered=[bad, good])
         assert args.yamcs_web_extension_dirs == [good]
         assert "Skipping discovered web extension" in capsys.readouterr().err
+
+
+class TestGetDictionaryConstants:
+    """get_dictionary_constants returns values in requested order regardless of dictionary order"""
+
+    def write_dictionary(self, tmp_path, constants):
+        dictionary = tmp_path / "dictionary.json"
+        dictionary.write_text(json.dumps({"constants": constants}))
+        return dictionary
+
+    def test_requested_order_preserved(self, tmp_path):
+        dictionary = self.write_dictionary(tmp_path, [
+            {"qualifiedName": "ComCfg.SpacecraftId", "value": 68},
+            {"qualifiedName": "Other", "value": 1},
+            {"qualifiedName": "ComCfg.TmFrameFixedSize", "value": 1024},
+        ])
+        assert get_dictionary_constants(dictionary, ["ComCfg.TmFrameFixedSize", "ComCfg.SpacecraftId"]) == [1024, 68]
+        assert get_dictionary_constants(dictionary, ["ComCfg.SpacecraftId", "ComCfg.TmFrameFixedSize"]) == [68, 1024]
+
+    def test_missing_constant_rejected(self, tmp_path):
+        dictionary = self.write_dictionary(tmp_path, [{"qualifiedName": "ComCfg.SpacecraftId", "value": 68}])
+        with pytest.raises(ValueError, match="ComCfg.TmFrameFixedSize"):
+            get_dictionary_constants(dictionary, ["ComCfg.TmFrameFixedSize", "ComCfg.SpacecraftId"])
 
 
 class TestAnchorRelativeMdbPaths:
