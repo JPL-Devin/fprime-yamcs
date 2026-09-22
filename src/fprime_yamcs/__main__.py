@@ -366,27 +366,21 @@ def xtce_mdb_location(config_directory: Path, instances: List[str]) -> Tuple[Pat
     else:
         raise Exception(f"No valid YAMCS instance found in {config_directory / 'etc'}")
 
-def get_dictionary_constants(dictionary: Path, constants: List[str]) -> str:
-    """ Get the dictionary constant from the F Prime dictionary path
-
-    This extracts constants from the F Prime dictionary.
+def get_dictionary_constant(dictionary: Path, name: str):
+    """ Get a constant's value from the F Prime dictionary
 
     Args:
         dictionary: The path to the F Prime dictionary file
-        constants: A list of constant names to look for in the dictionary
+        name: Qualified name of the constant to look up
     Returns:
-        a list of constants found in the dictionary that match the supplied list of constant names
+        the value of the requested constant
     """
     with open(str(dictionary)) as f:
-        dictionary_data = json.load(f)
-        constants_data = dictionary_data.get("constants", [])
-    found_constants = [
-        constant["value"] for constant in constants_data if constant.get("qualifiedName", "") in constants
-    ]
-    if len(found_constants) != len(constants):
-        raise ValueError(f"Required constants {constants} not found in dictionary")
-    return found_constants
-
+        constants_data = json.load(f).get("constants", [])
+    for constant in constants_data:
+        if constant.get("qualifiedName") == name:
+            return constant["value"]
+    raise ValueError(f"Required constant {name} not found in dictionary")
 
 
 def get_channel_ids(dictionary: Path, channel_patterns: List[str]) -> List[int]:
@@ -505,7 +499,8 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
     assert instance_path.is_file(), f"YAMCS instance configuration {instance_path} not found."
     with instance_path.open() as f:
         instance_config = yaml.safe_load(f)
-    constants = get_dictionary_constants(dictionary, ["ComCfg.TmFrameFixedSize", "ComCfg.SpacecraftId"])
+    frame_size = get_dictionary_constant(dictionary, "ComCfg.TmFrameFixedSize")
+    spacecraft_id = get_dictionary_constant(dictionary, "ComCfg.SpacecraftId")
     realtime_only_ids = get_channel_ids(dictionary, realtime_only_channels)
     realtime_only_packet_ids = get_packet_ids(dictionary, realtime_only_channels) if realtime_only_channels else []
     for link in instance_config.get("dataLinks", []):
@@ -513,8 +508,8 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
         if link.get("class", "") == "org.yamcs.tctm.ccsds.UdpTmFrameLink":
             print(f"[INFO] Setting downlink port for TM link {link.get('name', '')} to {downlink_port}")
             link["port"] = downlink_port
-            link["frameLength"] = constants[0]
-            link["spacecraftId"] = constants[1]
+            link["frameLength"] = frame_size
+            link["spacecraftId"] = spacecraft_id
             for vc in link.get("virtualChannels", []):
                 # Space packets may span multiple TM frames (e.g. large telemetry
                 # channels), so the maximum packet length is independent of (and can
@@ -539,8 +534,8 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
         elif link.get("class", "") == "org.yamcs.tctm.ccsds.UdpTcFrameLink":
             print(f"[INFO] Setting uplink port for TC link {link.get('name', '')} to {uplink_port}")
             link["port"] = uplink_port
-            link["maxFrameLength"] = constants[0]
-            link["spacecraftId"] = constants[1]
+            link["maxFrameLength"] = frame_size
+            link["spacecraftId"] = spacecraft_id
             if sdls_key_file is not None:
                 print(f"[INFO] Enabling SDLS AES-256-GCM encryption (SPI {sdls_spi}) for TC link {link.get('name', '')}")
                 link["encryption"] = [sdls_encryption_config(sdls_key_file, sdls_spi)]
