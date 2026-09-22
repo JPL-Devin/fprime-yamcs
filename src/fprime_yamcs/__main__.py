@@ -366,29 +366,21 @@ def xtce_mdb_location(config_directory: Path, instances: List[str]) -> Tuple[Pat
     else:
         raise Exception(f"No valid YAMCS instance found in {config_directory / 'etc'}")
 
-def get_dictionary_constants(dictionary: Path, constants: List[str]) -> List:
-    """ Get the dictionary constant from the F Prime dictionary path
-
-    This extracts constants from the F Prime dictionary. The order of the `constants` array in the dictionary is not
-    stable, so values are returned in the order of the requested names.
+def get_dictionary_constant(dictionary: Path, name: str):
+    """ Get a constant's value from the F Prime dictionary
 
     Args:
         dictionary: The path to the F Prime dictionary file
-        constants: A list of constant names to look for in the dictionary
+        name: Qualified name of the constant to look up
     Returns:
-        the values of the requested constants, in the order of the supplied names
+        the value of the requested constant
     """
     with open(str(dictionary)) as f:
-        dictionary_data = json.load(f)
-        constants_data = dictionary_data.get("constants", [])
-    values_by_name = {
-        constant["qualifiedName"]: constant["value"] for constant in constants_data if "qualifiedName" in constant
-    }
-    missing = [name for name in constants if name not in values_by_name]
-    if missing:
-        raise ValueError(f"Required constants {missing} not found in dictionary")
-    return [values_by_name[name] for name in constants]
-
+        constants_data = json.load(f).get("constants", [])
+    for constant in constants_data:
+        if constant.get("qualifiedName") == name:
+            return constant["value"]
+    raise ValueError(f"Required constant {name} not found in dictionary")
 
 
 def get_channel_ids(dictionary: Path, channel_patterns: List[str]) -> List[int]:
@@ -507,7 +499,8 @@ def construct_temporary_configuration(config_directory: Path, instances: List[st
     assert instance_path.is_file(), f"YAMCS instance configuration {instance_path} not found."
     with instance_path.open() as f:
         instance_config = yaml.safe_load(f)
-    frame_size, spacecraft_id = get_dictionary_constants(dictionary, ["ComCfg.TmFrameFixedSize", "ComCfg.SpacecraftId"])
+    frame_size = get_dictionary_constant(dictionary, "ComCfg.TmFrameFixedSize")
+    spacecraft_id = get_dictionary_constant(dictionary, "ComCfg.SpacecraftId")
     realtime_only_ids = get_channel_ids(dictionary, realtime_only_channels)
     realtime_only_packet_ids = get_packet_ids(dictionary, realtime_only_channels) if realtime_only_channels else []
     for link in instance_config.get("dataLinks", []):
