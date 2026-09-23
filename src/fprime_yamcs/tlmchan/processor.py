@@ -38,6 +38,7 @@ from yamcs.client import Packet
 # FPrime imports
 from fprime_gds.common.loaders.ch_json_loader import ChJsonLoader
 from fprime_gds.common.decoders.ch_decoder import ChDecoder
+from fprime_gds.common.models.dictionaries import Dictionaries
 from fprime_gds.common.models.serialize.time_type import TimeType
 from fprime_gds.common.utils.config_manager import ConfigManager
 from .logging import logger
@@ -99,6 +100,9 @@ class FPrimeTlmChanProcessor:
         """Initialize the FPrime channel decoder with the topology dictionary"""
         if not self.dictionary_path.exists():
             raise FileNotFoundError(f"Dictionary not found: {self.dictionary_path}")
+
+        # Dictionary-defined types (e.g. FwSizeStoreType) must be configured before decoding
+        Dictionaries.load_dictionaries_into_config(str(self.dictionary_path))
 
         # Load the channel dictionary
         channel_loader = ChJsonLoader(self.dictionary_path)

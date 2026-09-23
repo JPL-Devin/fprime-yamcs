@@ -30,6 +30,7 @@ from yamcs.client import Packet
 # FPrime imports
 from fprime_gds.common.loaders.event_json_loader import EventJsonLoader
 from fprime_gds.common.decoders.event_decoder import EventDecoder
+from fprime_gds.common.models.dictionaries import Dictionaries
 from fprime_gds.common.utils.config_manager import ConfigManager
 from .logging import logger
 
@@ -84,6 +85,9 @@ class FPrimeEventProcessor:
         if not self.dictionary_path.exists():
             raise FileNotFoundError(f"Dictionary not found: {self.dictionary_path}")
         
+        # Dictionary-defined types (e.g. FwSizeStoreType) must be configured before decoding
+        Dictionaries.load_dictionaries_into_config(str(self.dictionary_path))
+
         # Load the event dictionary
         event_loader = EventJsonLoader(self.dictionary_path)
         event_dict = event_loader.get_id_dict(str(self.dictionary_path))
