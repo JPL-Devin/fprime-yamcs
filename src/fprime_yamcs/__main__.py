@@ -43,6 +43,7 @@ from fprime_gds.executables.run_deployment import BASE_MODULE_ARGUMENTS, app_con
 from fprime_gds.plugin.system import Plugins
 
 from fprime_gds.common.communication.bridge import DEFAULT_COMMUNICATION, DEFAULT_FRAMING
+from fprime_gds.executables.comm_bridge import GROUND_ADAPTER as BRIDGE_GROUND_ADAPTER
 
 from fprime_yamcs.java import (
     JavaResolutionException,
@@ -61,7 +62,7 @@ SDLS_AES_256_GCM_FACTORY = "org.yamcs.security.sdls.SecurityAssociationAes256Gcm
 # Communication adapters whose deployments exchange UDP datagrams with YAMCS directly, needing no bridge
 DIRECT_COMMUNICATION_SELECTIONS = {"udp", "none"}
 # The bridge's own YAMCS-side adapter; its options are supplied by comm_bridge_arguments, not forwarded
-BRIDGE_GROUND_SELECTION = "udp-fast"
+BRIDGE_GROUND_SELECTION = BRIDGE_GROUND_ADAPTER.get_name()
 BRIDGE_GROUND_OPTION_PREFIX = f"--{BRIDGE_GROUND_SELECTION}-"
 
 # The launcher only selects the communication adapter; framing is fixed to the bridge default
