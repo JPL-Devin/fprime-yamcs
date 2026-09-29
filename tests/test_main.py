@@ -192,8 +192,8 @@ class TestCommBridgeAutostart:
         for expected in (["--tcp-fast-port", "50000"],
                          ["--framing-selection", "tm-frame-aggregator"],
                          ["--dictionary", str(DICTIONARY)],
-                         ["--tm-host", "127.0.0.1", "--tm-port", "50000"],
-                         ["--tc-host", "127.0.0.1", "--tc-port", "50001"]):
+                         ["--udp-fast-address", "127.0.0.1", "--udp-fast-send-port", "50000"],
+                         ["--udp-fast-bind-address", "127.0.0.1", "--udp-fast-recv-port", "50001"]):
             assert contains_sequence(arguments, expected), expected
 
     def test_bridge_arguments_carry_tcp_fast_options(self):
@@ -201,7 +201,8 @@ class TestCommBridgeAutostart:
                                "--tcp-fast-port", "50123", "--udp-downlink-port", "60000")
         arguments = comm_bridge_arguments(args)
         for expected in (["--communication-selection", "tcp-fast-client"], ["--tcp-fast-address", "10.0.0.7"],
-                         ["--tcp-fast-port", "50123"], ["--tm-port", "60000"], ["--tc-port", "50001"]):
+                         ["--tcp-fast-port", "50123"], ["--udp-fast-send-port", "60000"],
+                         ["--udp-fast-recv-port", "50001"]):
             assert contains_sequence(arguments, expected), expected
 
     def test_bridge_arguments_reproduce_adapter_and_yamcs_ports(self):
@@ -210,8 +211,8 @@ class TestCommBridgeAutostart:
         arguments = comm_bridge_arguments(args)
         for expected in (["--communication-selection", "ip"], ["--ip-port", "50050"], ["--ip-client"],
                          ["--framing-selection", "tm-frame-aggregator"],
-                         ["--tm-host", "127.0.0.1", "--tm-port", "60000"],
-                         ["--tc-host", "127.0.0.1", "--tc-port", "60001"]):
+                         ["--udp-fast-address", "127.0.0.1", "--udp-fast-send-port", "60000"],
+                         ["--udp-fast-bind-address", "127.0.0.1", "--udp-fast-recv-port", "60001"]):
             assert contains_sequence(arguments, expected), expected
 
     def test_bridge_arguments_carry_uart_options(self):

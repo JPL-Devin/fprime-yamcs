@@ -73,7 +73,7 @@ Telemetry flow is detected from the selected processor's TM statistics stream (r
 Non-`udp` communication adapters are bridged to the YAMCS UDP links by [`fprime-comm-bridge`](https://github.com/fprime-community/fprime-gds), which ships with `fprime-gds`. `fprime-yamcs` starts it automatically whenever a communication adapter other than `udp` is selected, forwarding the adapter options, the dictionary, and the configured YAMCS UDP ports and selecting `tm-frame-aggregator` framing; run it directly when operating YAMCS without the full launcher.
 
 - The endpoint side is reached through an F Prime GDS **communication adapter plugin** (`--communication-selection`: `tcp-fast-server` by default on `--tcp-fast-port` 50000, or `tcp-fast-client`, `uart`, `ip`, or any installed adapter plugin).
-- The YAMCS side pushes deframed packets as UDP datagrams to the telemetry intake (`--tm-host`/`--tm-port`, default `127.0.0.1:50000`) and receives command datagrams on a local UDP port (`--tc-host`/`--tc-port`, default `127.0.0.1:50001`). Command datagrams are only accepted from the TM host, loopback (`127.0.0.1`), and any hosts supplied via `--tc-allowed-source`.
+- The YAMCS side is the `udp-fast` communication adapter: it pushes deframed packets as UDP datagrams to the telemetry intake (`--udp-fast-address`/`--udp-fast-send-port`, default `127.0.0.1:50000`) and receives command datagrams on a local UDP port (`--udp-fast-bind-address`/`--udp-fast-recv-port`, default `127.0.0.1:50001`). Command datagrams are only accepted from the peer address, loopback (`127.0.0.1`), and any hosts supplied via `--udp-fast-allowed-source`.
 - One stage of framing/deframing sits in between, provided by an F Prime GDS **framing plugin** (`--framing-selection`). The default, `tm-frame-aggregator`, reassembles the endpoint byte stream into complete fixed-size CCSDS TM transfer frames (one per UDP datagram) and passes TC frames through unchanged, since YAMCS performs the CCSDS framing/deframing itself. It needs the frame size and spacecraft ID: pass `--dictionary <F Prime JSON dictionary>` or `--deployment <build output directory>` (reading `ComCfg.TmFrameFixedSize`/`ComCfg.SpacecraftId`; the launcher forwards its own dictionary) or `--frame-size`/`--scid` explicitly.
 
 > [!NOTE]
@@ -83,7 +83,7 @@ Example, serving a `Drv.TcpClient` deployment on TCP port 50000 with TM frames s
 
 ```
 fprime-comm-bridge --deployment build-artifacts/Linux/Ref \
-    --tm-host 127.0.0.1 --tm-port 50000 --tc-port 50001
+    --udp-fast-address 127.0.0.1 --udp-fast-send-port 50000 --udp-fast-recv-port 50001
 ```
 
 ```mermaid

@@ -126,8 +126,8 @@ def comm_bridge_arguments(parsed_args) -> List[str]:
     """ Build the fprime-comm-bridge command line arguments matching the launcher's arguments
 
     Reproduces the communication plugin selection and options as supplied to the launcher, selects the TM frame
-    aggregating framer fed by the launcher's dictionary (frame size and spacecraft ID), and points the bridge's YAMCS
-    side at the configured TM (downlink) and TC (uplink) UDP ports.
+    aggregating framer fed by the launcher's dictionary (frame size and spacecraft ID), and points the bridge's
+    `udp-fast` ground adapter at the configured YAMCS TM (downlink) and TC (uplink) UDP ports on loopback.
 
     Args:
         parsed_args: parsed argument namespace
@@ -137,8 +137,8 @@ def comm_bridge_arguments(parsed_args) -> List[str]:
     communication_arguments = PluginArgumentParser(Plugins(LAUNCHER_PLUGIN_CATEGORIES)).reproduce_cli_args(parsed_args)
     return communication_arguments + [
         "--framing-selection", DEFAULT_FRAMING, "--dictionary", str(Path(parsed_args.dictionary).resolve()),
-        "--tm-host", "127.0.0.1", "--tm-port", str(parsed_args.udp_downlink_port),
-        "--tc-host", "127.0.0.1", "--tc-port", str(parsed_args.udp_uplink_port),
+        "--udp-fast-address", "127.0.0.1", "--udp-fast-send-port", str(parsed_args.udp_downlink_port),
+        "--udp-fast-bind-address", "127.0.0.1", "--udp-fast-recv-port", str(parsed_args.udp_uplink_port),
     ]
 
 
