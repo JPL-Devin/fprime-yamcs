@@ -34,12 +34,14 @@ from fprime_yamcs.__main__ import (
     YamcsPluginArgumentParser,
     anchor_relative_mdb_paths,
     check_comm_bridge_ports,
+    check_communication_selection,
     comm_bridge_arguments,
     get_dictionary_constant,
     launch_comm_bridge,
     launch_deployment_app,
     launch_yamcs_maven,
     needs_comm_bridge,
+    without_options,
 )
 
 DICTIONARY = Path("/deploy/dict/RefTopologyDictionary.json")
@@ -222,6 +224,29 @@ class TestCommBridgeAutostart:
         assert arguments[:2] == ["--communication-selection", "uart"]
         assert arguments[arguments.index("--uart-device") + 1] == "/dev/ttyUSB3"
         assert arguments[arguments.index("--uart-baud") + 1] == "115200"
+
+    def test_bridge_ground_options_forwarded_once(self):
+        """The launcher's reproduced udp-fast defaults must not precede the bridge's explicit ground options"""
+        arguments = comm_bridge_arguments(parse_comm_args("--udp-downlink-port", "60000"))
+        for option in ("--udp-fast-address", "--udp-fast-send-port", "--udp-fast-bind-address",
+                       "--udp-fast-recv-port"):
+            assert arguments.count(option) == 1, option
+        assert "--udp-fast-allowed-source" not in arguments
+        assert arguments[arguments.index("--udp-fast-send-port") + 1] == "60000"
+
+    def test_without_options_drops_option_and_values(self):
+        arguments = ["--communication-selection", "uart", "--udp-fast-allowed-source", "10.0.0.1", "10.0.0.2",
+                     "--uart-baud", "9600", "--udp-fast-send-port", "50000", "--ip-client"]
+        assert without_options(arguments, "--udp-fast-") == ["--communication-selection", "uart", "--uart-baud",
+                                                              "9600", "--ip-client"]
+
+    def test_udp_fast_selection_rejected(self):
+        with pytest.raises(Exception, match="YAMCS-side adapter"):
+            check_communication_selection("udp-fast")
+
+    @pytest.mark.parametrize("selection", ["udp", "none", "tcp-fast-server", "uart"])
+    def test_other_selections_accepted(self, selection):
+        check_communication_selection(selection)
 
     def test_ip_port_colliding_with_yamcs_rejected(self):
         args = parse_comm_args("--communication-selection", "ip", "--ip-port", "50001")
