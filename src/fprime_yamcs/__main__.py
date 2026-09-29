@@ -42,7 +42,7 @@ from fprime_gds.executables.cli import ConfigDrivenParser, DictionaryParser, Bin
 from fprime_gds.executables.run_deployment import BASE_MODULE_ARGUMENTS, app_connection, launch_app, launch_process
 from fprime_gds.plugin.system import Plugins
 
-from fprime_yamcs.comm import DEFAULT_COMMUNICATION, DEFAULT_FRAMING
+from fprime_gds.common.communication.bridge import DEFAULT_COMMUNICATION, DEFAULT_FRAMING
 
 from fprime_yamcs.java import (
     JavaResolutionException,
@@ -96,7 +96,7 @@ def needs_comm_bridge(communication_selection: str) -> bool:
     Args:
         communication_selection: name of the selected communication plugin (e.g. "ip", "uart", "udp")
     Returns:
-        True when fprime-yamcs-comm must be started to bridge the adapter to YAMCS
+        True when fprime-comm-bridge must be started to bridge the adapter to YAMCS
     """
     return communication_selection not in DIRECT_COMMUNICATION_SELECTIONS
 
@@ -123,7 +123,7 @@ def check_comm_bridge_ports(parsed_args):
 
 
 def comm_bridge_arguments(parsed_args) -> List[str]:
-    """ Build the fprime-yamcs-comm command line arguments matching the launcher's arguments
+    """ Build the fprime-comm-bridge command line arguments matching the launcher's arguments
 
     Reproduces the communication plugin selection and options as supplied to the launcher, selects the TM frame
     aggregating framer fed by the launcher's dictionary (frame size and spacecraft ID), and points the bridge's YAMCS
@@ -132,7 +132,7 @@ def comm_bridge_arguments(parsed_args) -> List[str]:
     Args:
         parsed_args: parsed argument namespace
     Returns:
-        argument list for fprime-yamcs-comm
+        argument list for fprime-comm-bridge
     """
     communication_arguments = PluginArgumentParser(Plugins(LAUNCHER_PLUGIN_CATEGORIES)).reproduce_cli_args(parsed_args)
     return communication_arguments + [
@@ -143,17 +143,17 @@ def comm_bridge_arguments(parsed_args) -> List[str]:
 
 
 def launch_comm_bridge(parsed_args):
-    """ Launch fprime-yamcs-comm bridging the selected communication adapter to the YAMCS UDP links
+    """ Launch fprime-comm-bridge bridging the selected communication adapter to the YAMCS UDP links
 
     Args:
         parsed_args: parsed argument namespace
     Return:
         launched process
     """
-    bridge_cmd = BASE_MODULE_ARGUMENTS + ["fprime_yamcs.comm"] + comm_bridge_arguments(parsed_args)
+    bridge_cmd = BASE_MODULE_ARGUMENTS + ["fprime_gds.executables.comm_bridge"] + comm_bridge_arguments(parsed_args)
     return launch_process(
         bridge_cmd,
-        name=f"fprime-yamcs-comm[{parsed_args.communication_selection}]",
+        name=f"fprime-comm-bridge[{parsed_args.communication_selection}]",
         launch_time=1,
     )
 
@@ -708,7 +708,7 @@ def main():
         launched_bridges = []
         if needs_comm_bridge(parsed_args.communication_selection):
             check_comm_bridge_ports(parsed_args)
-            print(f"[INFO] Bridging '{parsed_args.communication_selection}' communication to YAMCS with fprime-yamcs-comm")
+            print(f"[INFO] Bridging '{parsed_args.communication_selection}' communication to YAMCS with fprime-comm-bridge")
             launched_bridges = [launch_comm_bridge]
         # First load the instances to find the XTCE MDB location, and convert the F Prime dictionary if needed
         instances = yamcs_instances(parsed_args.yamcs_config_dir)

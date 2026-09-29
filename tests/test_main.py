@@ -163,7 +163,7 @@ def contains_sequence(arguments, expected):
 
 
 class TestCommBridgeAutostart:
-    """The launcher bridges every communication adapter other than udp through fprime-yamcs-comm"""
+    """The launcher bridges every communication adapter other than udp through fprime-comm-bridge"""
 
     def test_default_selection_is_tcp_fast_server_on_gds_port(self):
         args = parse_comm_args()
@@ -262,9 +262,9 @@ class TestCommBridgeAutostart:
         with patch.object(main_module, "launch_process") as launch:
             launch_comm_bridge(args)
         command = launch.call_args.args[0]
-        assert command[:4] == [sys.executable, "-u", "-m", "fprime_yamcs.comm"]
+        assert command[:4] == [sys.executable, "-u", "-m", "fprime_gds.executables.comm_bridge"]
         assert command[4:] == comm_bridge_arguments(args)
-        assert launch.call_args.kwargs["name"] == "fprime-yamcs-comm[ip]"
+        assert launch.call_args.kwargs["name"] == "fprime-comm-bridge[ip]"
 
 
 class TestMavenFallback:
