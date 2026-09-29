@@ -197,6 +197,8 @@ class TestCommBridgeAutostart:
                          ["--udp-fast-address", "127.0.0.1", "--udp-fast-send-port", "50000"],
                          ["--udp-fast-bind-address", "127.0.0.1", "--udp-fast-recv-port", "50001"]):
             assert contains_sequence(arguments, expected), expected
+        assert arguments[-8:] == ["--udp-fast-address", "127.0.0.1", "--udp-fast-send-port", "50000",
+                                  "--udp-fast-bind-address", "127.0.0.1", "--udp-fast-recv-port", "50001"]
 
     def test_bridge_arguments_carry_tcp_fast_options(self):
         args = parse_comm_args("--communication-selection", "tcp-fast-client", "--tcp-fast-address", "10.0.0.7",
