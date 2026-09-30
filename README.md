@@ -40,7 +40,7 @@ Selecting `--communication-selection udp` expects the deployment to exchange UDP
 > TCP port 50000 (`--tcp-fast-port`) and the YAMCS UDP ports (`--udp-downlink-port` 50000, `--udp-uplink-port` 50001, `--udp-tm-inject-port` 50002 by default) do not conflict: TCP and UDP port numbers are independent. The legacy `ip` adapter binds both TCP and UDP on `--ip-port`, so it must differ from the YAMCS UDP ports (e.g. `--communication-selection ip --ip-port 50050`); the launcher refuses colliding ports. The deployment binary (`--app`) is launched with `-a`/`-p` matching the serving adapter (`--tcp-fast-address`/`--tcp-fast-port` or `--ip-address`/`--ip-port`).
 
 > [!IMPORTANT]
-> The bridge defaults require the `tcp-fast-server` and `tm-frame-aggregator` plugins of `fprime-gds` 4.4.0a2 or later. Framing plugins other than the CCSDS TM/TC path are not supported by the launcher.
+> The bridge defaults require the `tcp-fast-server` and `tm-frame-aggregator` plugins of `fprime-gds` 4.4.0 or later. Framing plugins other than the CCSDS TM/TC path are not supported by the launcher.
 
 ## fprime-yamcs-events: Event Processor
 
