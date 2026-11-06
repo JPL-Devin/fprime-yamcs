@@ -68,6 +68,14 @@ Telemetry flow is detected from the selected processor's TM statistics stream (r
 
 `fprime-yamcs-tlmchan` closes this gap: it reads the F Prime JSON topology dictionary, subscribes to the aggregate `FPrimeTelemetryChannel` container, walks every record in each packet, and re-injects each record beyond the first as a standalone single-record space packet on a dedicated UDP telemetry data link (`UDP_TM_SPLIT_IN`, default port 50002, configurable via `--udp-tm-inject-port` / `FPRIME_YAMCS_TM_INJECT_PORT`). YAMCS then decodes each injected packet through its normal XTCE path, publishing every channel as a parameter. It is launched automatically by `fprime-yamcs`; run it directly when operating YAMCS without the full `fprime-yamcs` launcher.
 
+## fprime-yamcs-dataproducts: Data Product Catalog
+
+`fprime-yamcs-dataproducts` watches the `fprimeFilesIn` bucket where completed F Prime file downlinks land, recognizes [data products](https://fprime.jpl.nasa.gov/latest/docs/user-manual/data-products/) by their CRC-validated binary header (not by file name), and publishes a catalog of them to the `fprimeDataProducts` bucket together with the decoded JSON (`<ContainerShortName>_<sec>_<usec>.json`, the `fprime-gds` naming). Decoding reuses the `fprime-gds` data product decoder and runs on one background worker with a bounded queue; the catalog keeps the newest 1000 products. It is launched automatically by `fprime-yamcs`; run it directly when operating YAMCS without the full launcher.
+
+### F´ Data Products Web Display
+
+The YAMCS web interface gains an **F´ Data Products** page (sidebar item, served at `/ext/fprime-dataproducts`) listing every downlinked data product with its container name translated from the dictionary, container ID, header timestamp, priority, size and decode state. Each row has a **Decode** button (then **Re-decode** / **Retry**), an **Open JSON** link once decoded, and a link to the raw `.fdp` object. An **Auto-decode new products** toggle (off by default, server-side) decodes every product as it arrives. The page talks to the processor through the `fprimeDataProducts` bucket (`catalog.json`, `requests/<name>`, `settings/auto_decode`), so no additional YAMCS service or configuration is required.
+
 ## Communication Bridge: fprime-comm-bridge
 
 Non-`udp` communication adapters are bridged to the YAMCS UDP links by [`fprime-comm-bridge`](https://github.com/nasa/fprime-gds), which ships with `fprime-gds`. `fprime-yamcs` starts it automatically whenever a communication adapter other than `udp` is selected (`udp-fast` is the bridge's own YAMCS-side adapter and is rejected as a flight-side selection), forwarding the adapter options, the dictionary, and the configured YAMCS UDP ports and selecting `tm-frame-aggregator` framing; run it directly when operating YAMCS without the full launcher.

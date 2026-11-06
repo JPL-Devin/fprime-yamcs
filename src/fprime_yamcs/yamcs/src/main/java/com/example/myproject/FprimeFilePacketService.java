@@ -997,9 +997,8 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
         }
 
         // Strip leading "/" from the destination so the bucket sees a relative key.
-        String objectName = inflight.destinationPath.startsWith("/")
-                ? inflight.destinationPath.substring(1)
-                : inflight.destinationPath;
+        // Bucket object names are relative: "/a/b" and "./a/b" both become "a/b"
+        String objectName = inflight.destinationPath.replaceFirst("^(\\./|/)+", "");
 
         try {
             // putObjectAsync returns a CompletableFuture<Void>; block on it so
@@ -1011,8 +1010,8 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
                     objectName, inflight.bytesReceived, bucketName);
 
             try {
-                Files.createDirectories(downlinkMirrorDir);
                 Path mirrorPath = downlinkMirrorDir.resolve(objectName);
+                Files.createDirectories(mirrorPath.getParent());
                 Files.write(mirrorPath, inflight.reassemblyBuffer);
                 LOG.info("Mirrored downlink file to {}", mirrorPath);
             } catch (IOException e) {
