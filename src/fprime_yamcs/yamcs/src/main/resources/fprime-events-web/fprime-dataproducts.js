@@ -240,10 +240,9 @@ class FprimeDataProductsElement extends HTMLElement {
         return; // stopped while waiting
       }
       try {
-        const catalog = JSON.parse(text);
-        if (!this._catalog || !(catalog.revision < this._catalog.revision)) {
-          this._catalog = catalog;
-        }
+        // Polls never overlap (_inFlight), so the latest response is the latest catalog; the revision
+        // restarts at 0 whenever the processor restarts and must not be compared across responses.
+        this._catalog = JSON.parse(text);
         this._parseError = false;
       } catch (err) {
         this._parseError = true; // keep showing the last good catalog
