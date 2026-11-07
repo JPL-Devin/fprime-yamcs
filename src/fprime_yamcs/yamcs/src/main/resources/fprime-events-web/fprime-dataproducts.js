@@ -189,6 +189,7 @@ class FprimeDataProductsElement extends HTMLElement {
     this._client = null;
     this._timer = null;
     this._catalog = null;
+    this._clockOffsetMs = 0; // browser clock minus server clock, from the Date header of the last catalog response
     this._pending = new Map(); // product name -> state when the decode was requested
     this._autoPending = null; // {value, until}: optimistic checkbox value until the server confirms it
     this._rows = new Map(); // product name -> {signature, row}
@@ -238,6 +239,10 @@ class FprimeDataProductsElement extends HTMLElement {
       const text = await response.text();
       if (!this._timer) {
         return; // stopped while waiting
+      }
+      const serverDate = Date.parse(response.headers && response.headers.get("date"));
+      if (!Number.isNaN(serverDate)) {
+        this._clockOffsetMs = Date.now() - serverDate;
       }
       try {
         // Polls never overlap (_inFlight), so the latest response is the latest catalog; the revision
@@ -373,7 +378,8 @@ class FprimeDataProductsElement extends HTMLElement {
     this._settlePending(products);
     const decoded = products.filter((p) => p.state === "DECODED").length;
     const processor = catalog.processor || {};
-    const ageMs = Date.now() - Date.parse(catalog.updated);
+    // Age is measured on the server clock so a browser clock offset does not produce a false warning
+    const ageMs = Date.now() - this._clockOffsetMs - Date.parse(catalog.updated);
     const staleAfterMs = 3 * (processor.liveness_period || 10) * 1000;
     let problem = this._parseError ? "catalog.json is not valid JSON" : processor.last_error;
     if (!problem && ageMs > staleAfterMs) {
