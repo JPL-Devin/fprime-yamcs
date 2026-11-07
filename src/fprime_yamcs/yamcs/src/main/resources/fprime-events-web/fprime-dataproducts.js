@@ -15,16 +15,18 @@
 const DP_BUCKET = "fprimeDataProducts";
 const FILES_BUCKET = "fprimeFilesIn";
 const CATALOG_OBJECT = "catalog.json";
-const POLL_MS = 1000;
-const PENDING_MS = 3000;
+const POLL_MS = 2000;
+const PENDING_MS = 5000;
 const TB_WORKSTATION = 2;
 
+// Dark enough for white 11 px text (WCAG AA)
 const STATE_COLORS = {
   DETECTED: "#6c757d",
-  QUEUED: "#17a2b8",
-  DECODING: "#17a2b8",
-  DECODED: "#28a745",
-  FAILED: "#dc3545",
+  QUEUED: "#0f6674",
+  DECODING: "#0f6674",
+  DECODED: "#1e7e34",
+  FAILED: "#c82333",
+  DUPLICATE: "#5a6268",
 };
 
 const PAGE_STYLE = `
@@ -86,9 +88,26 @@ const PAGE_STYLE = `
     z-index: 1;
   }
   td.fp-error {
-    white-space: normal;
-    max-width: 320px;
-    color: #dc3545;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #c82333;
+  }
+  td.fp-file {
+    max-width: 170px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Actions stay reachable however wide the other columns get */
+  th.fp-actions, td.fp-actions {
+    position: sticky;
+    right: 0;
+    background: #fff;
+    box-shadow: -4px 0 4px -4px rgba(0, 0, 0, 0.2);
+  }
+  th.fp-actions {
+    background: #fafafa;
+    z-index: 2;
   }
   td.fp-num {
     text-align: right;
@@ -143,6 +162,11 @@ export function decodeLabel(state) {
   return { DETECTED: "Decode", DECODED: "Re-decode", FAILED: "Retry" }[state] || null;
 }
 
+/** Base name of a bucket object, without the DpCatalog's leading dots */
+export function baseName(name) {
+  return name.split("/").pop().replace(/^\.+/, "");
+}
+
 /** Error text without a trailing quoted path (the full text stays in the tooltip) */
 export function shortError(error) {
   return (error || "").replace(/:\s*'[^']*'\s*$/, "");
@@ -160,7 +184,11 @@ class FprimeDataProductsElement extends HTMLElement {
     this._timer = null;
     this._catalog = null;
     this._pending = new Map(); // product name -> state when the decode was requested
+    this._autoPending = null; // {value, until}: optimistic checkbox value until the server confirms it
+    this._rows = new Map(); // product name -> {signature, row}
+    this._inFlight = false;
     this._lastError = null;
+    this._parseError = false;
   }
 
   set extensionService(service) {
@@ -194,13 +222,31 @@ class FprimeDataProductsElement extends HTMLElement {
   }
 
   async poll() {
+    if (this._inFlight) {
+      return; // a slow response must not be overtaken by a newer one
+    }
+    this._inFlight = true;
     try {
       const response = await this._client.getObject(DP_BUCKET, CATALOG_OBJECT);
-      this._catalog = await response.json();
+      const text = await response.text();
+      if (!this._timer) {
+        return; // stopped while waiting
+      }
+      try {
+        const catalog = JSON.parse(text);
+        if (!this._catalog || !(catalog.revision < this._catalog.revision)) {
+          this._catalog = catalog;
+        }
+        this._parseError = false;
+      } catch (err) {
+        this._parseError = true; // keep showing the last good catalog
+      }
       this._lastError = null;
     } catch (err) {
       this._catalog = null;
       this._lastError = err;
+    } finally {
+      this._inFlight = false;
     }
     this.redraw();
   }
@@ -223,10 +269,13 @@ class FprimeDataProductsElement extends HTMLElement {
   }
 
   async setAutoDecode(checked) {
+    this._autoPending = { value: checked, until: Date.now() + PENDING_MS };
     try {
       await this._client.uploadObject(DP_BUCKET, "settings/auto_decode", new Blob([String(checked)]));
     } catch (err) {
       console.error("fprime-dataproducts: auto-decode toggle failed", err);
+      this._autoPending = null;
+      this.redraw();
     }
   }
 
@@ -260,9 +309,10 @@ class FprimeDataProductsElement extends HTMLElement {
     const table = document.createElement("table");
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    for (const title of ["Received", "DP Time", "Container", "ID", "Priority", "Size (B)", "State", "Error", "Actions"]) {
+    for (const title of ["Received", "DP Time", "File", "Container", "ID", "Priority", "Size (B)", "State", "Actions", "Error"]) {
       const th = document.createElement("th");
       th.textContent = title;
+      if (title === "Actions") th.className = "fp-actions";
       headRow.appendChild(th);
     }
     thead.appendChild(headRow);
@@ -284,8 +334,9 @@ class FprimeDataProductsElement extends HTMLElement {
       return;
     }
     const catalog = this._catalog;
-    this._tbody.innerHTML = "";
     if (!catalog) {
+      this._tbody.innerHTML = "";
+      this._rows.clear();
       const status = this._lastError && this._lastError.statusCode === 404 ? "not published yet" : "unreachable";
       this._status.textContent = `Catalog ${status}: is the fprime-yamcs-dataproducts processor running?`;
       this._status.className = "fp-status fp-warn";
@@ -295,16 +346,21 @@ class FprimeDataProductsElement extends HTMLElement {
       return;
     }
     this._autoBox.disabled = !catalog.enabled;
-    if (document.activeElement !== this._autoBox) {
-      this._autoBox.checked = !!catalog.auto_decode;
+    const pending = this._autoPending;
+    if (pending && (pending.value === !!catalog.auto_decode || Date.now() > pending.until)) {
+      this._autoPending = null;
     }
+    this._autoBox.checked = this._autoPending ? this._autoPending.value : !!catalog.auto_decode;
     const products = catalog.products || [];
     const decoded = products.filter((p) => p.state === "DECODED").length;
-    this._status.className = "fp-status";
-    this._status.textContent = catalog.enabled
+    const problem = this._parseError ? "catalog.json is not valid JSON" : catalog.processor && catalog.processor.last_error;
+    this._status.className = problem ? "fp-status fp-warn" : "fp-status";
+    this._status.textContent = (catalog.enabled
       ? `${products.length} products, ${decoded} decoded, queue ${catalog.queue.size}/${catalog.queue.limit}`
-      : "Dictionary has no data product containers";
+      : "Dictionary has no data product containers") + (problem ? ` — ${problem}` : "");
     if (!products.length) {
+      this._tbody.innerHTML = "";
+      this._rows.clear();
       this._empty.textContent = catalog.enabled
         ? "No data products detected yet. Files downlinked into bucket " + FILES_BUCKET +
           " whose content starts with a valid data product header are listed here."
@@ -313,9 +369,32 @@ class FprimeDataProductsElement extends HTMLElement {
       return;
     }
     this._empty.style.display = "none";
-    // Newest first, like the Events page in follow mode reversed
+    // Newest first; rows are reused when unchanged so focus, selection and tooltips survive the polls
+    const live = new Set();
+    let position = 0;
     for (let i = products.length - 1; i >= 0; i--) {
-      this._tbody.appendChild(this.buildRow(products[i]));
+      const product = products[i];
+      live.add(product.name);
+      const signature = JSON.stringify(product) + "|" + (this._pending.get(product.name) || "");
+      let entry = this._rows.get(product.name);
+      if (!entry || entry.signature !== signature) {
+        const row = this.buildRow(product);
+        if (entry) {
+          entry.row.replaceWith(row);
+        }
+        entry = { signature, row };
+        this._rows.set(product.name, entry);
+      }
+      if (this._tbody.children[position] !== entry.row) {
+        this._tbody.insertBefore(entry.row, this._tbody.children[position] || null);
+      }
+      position++;
+    }
+    for (const [name, entry] of this._rows) {
+      if (!live.has(name)) {
+        entry.row.remove();
+        this._rows.delete(name);
+      }
     }
   }
 
@@ -332,6 +411,7 @@ class FprimeDataProductsElement extends HTMLElement {
     const received = new Date(product.received);
     cell(isNaN(received) ? product.received : received.toISOString());
     cell(displayTime(product.time), null, `raw ${dpTime(product.time)}, time base ${product.time.base}`);
+    cell(baseName(product.name), "fp-file", product.name);
     cell(product.short_name || "unknown", null, product.container || `container id ${product.container_id} not in dictionary`);
     cell(formatHexId(product.container_id));
     cell(String(product.priority), "fp-num");
@@ -342,10 +422,10 @@ class FprimeDataProductsElement extends HTMLElement {
     badge.style.background = STATE_COLORS[product.state] || "#adb5bd";
     badge.textContent = product.state;
     stateCell.appendChild(badge);
-    cell(shortError(product.error), "fp-error", product.error || "");
 
     const actions = document.createElement("td");
-    const label = decodeLabel(product.state);
+    actions.className = "fp-actions";
+    const label = product.incomplete ? null : decodeLabel(product.state);
     if (label) {
       const button = document.createElement("button");
       button.textContent = label;
@@ -353,7 +433,7 @@ class FprimeDataProductsElement extends HTMLElement {
       button.addEventListener("click", () => this.decode(product));
       actions.appendChild(button);
     }
-    if (product.state === "DECODED") {
+    if (product.state === "DECODED" || product.state === "DUPLICATE") {
       actions.appendChild(document.createTextNode(" "));
       const link = document.createElement("a");
       link.href = this._client.getObjectURL(DP_BUCKET, product.json_name);
@@ -366,11 +446,12 @@ class FprimeDataProductsElement extends HTMLElement {
     actions.appendChild(document.createTextNode(" "));
     const raw = document.createElement("a");
     raw.href = this._client.getObjectURL(FILES_BUCKET, product.name);
-    raw.download = product.name.split("/").pop().replace(/^\.+/, "");
+    raw.download = baseName(product.name);
     raw.textContent = ".fdp";
     raw.title = product.name;
     actions.appendChild(raw);
     row.appendChild(actions);
+    cell(shortError(product.error), "fp-error", product.error || "");
     return row;
   }
 }

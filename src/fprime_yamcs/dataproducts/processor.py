@@ -24,7 +24,7 @@ from yamcs.client import YamcsClient
 
 from fprime_gds.common.models.dictionaries import Dictionaries
 
-from .catalog import DataProductCatalog, DecodeQueueFull, UnknownProduct, utc_iso
+from .catalog import CATALOG_LIMIT, DataProductCatalog, DecodeQueueFull, UnknownProduct, utc_iso
 from .logging import logger
 
 DEFAULT_IN_BUCKET = "fprimeFilesIn"
@@ -33,15 +33,17 @@ CATALOG_OBJECT = "catalog.json"
 REQUEST_PREFIX = "requests/"
 SETTING_PREFIX = "settings/"
 AUTO_DECODE_SETTING = SETTING_PREFIX + "auto_decode"
-POLL_PERIOD = 1.0
-LIVENESS_PERIOD = 5.0
+POLL_PERIOD = 2.0
+LIVENESS_PERIOD = 30.0
+DOWNLOAD_ATTEMPTS = 3
+BUCKET_HEADROOM = 20  # objects kept free in the output bucket for catalog.json and control objects
 
 
 def default_work_dir() -> pathlib.Path:
-    """Working directory: the FprimeFilePacketService mirror directory when configured, else a temp directory"""
+    """Private working directory: a sub-directory of the FprimeFilePacketService mirror when configured, else temp"""
     configured = os.environ.get("FPRIME_DOWNLINK_DIR")
     if configured:
-        return pathlib.Path(configured)
+        return pathlib.Path(configured) / ".dataproducts"
     return pathlib.Path(tempfile.gettempdir()) / "fprime-dataproducts"
 
 
@@ -57,9 +59,11 @@ class FPrimeDataProductProcessor:
         self.in_bucket_name = in_bucket
         self.out_bucket_name = out_bucket
         self.work_dir = pathlib.Path(work_dir) if work_dir else default_work_dir()
-        self._seen = {}  # object name -> created time of the last version considered
+        self._seen = {}  # object name -> (created, size) of the last version considered
+        self._download_failures = {}  # object name -> failed attempts on the current version
         self._published_revision = -1
         self._published_at = 0.0
+        self._last_error = None
 
         logger.info("Connecting to YAMCS at %s, instance: %s", yamcs_url, yamcs_instance)
         self.client = YamcsClient(yamcs_url)
@@ -71,7 +75,12 @@ class FPrimeDataProductProcessor:
         Dictionaries.load_dictionaries_into_config(str(self.dictionary_path))
         self.dictionaries = Dictionaries()
         self.dictionaries.load_dictionaries(str(self.dictionary_path), None, None)
-        self.catalog = DataProductCatalog(self.dictionaries, self.work_dir, publisher=self._publish_json)
+        self._ensure_buckets()
+        # Decoded JSON lives in the output bucket, whose object cap (YAMCS default 1000) bounds the catalog
+        max_objects = self.out_bucket.max_object_count or CATALOG_LIMIT
+        catalog_limit = max(1, min(CATALOG_LIMIT, max_objects - BUCKET_HEADROOM))
+        self.catalog = DataProductCatalog(self.dictionaries, self.work_dir, publisher=self._publish_json,
+                                          catalog_limit=catalog_limit, unpublisher=self._delete_quietly)
         if self.catalog.enabled:
             logger.info("%d data product containers in the dictionary", len(self.dictionaries.dp_container_id))
         else:
@@ -85,8 +94,13 @@ class FPrimeDataProductProcessor:
 
     def _publish_json(self, json_name: str, path: pathlib.Path):
         """Catalog publisher callback (worker thread): upload a decoded product"""
-        with open(path, "rb") as file_handle:
-            self.out_bucket.upload_object(json_name, file_handle, content_type="application/json")
+        try:
+            with open(path, "rb") as file_handle:
+                self.out_bucket.upload_object(json_name, file_handle, content_type="application/json")
+        except Exception as exc:
+            self._last_error = f"publishing {json_name} failed: {exc}"
+            raise
+        self._last_error = None
         logger.info("Published %s to bucket %s", json_name, self.out_bucket_name)
 
     def _existing_json(self, json_name: str) -> Optional[bytes]:
@@ -111,65 +125,77 @@ class FPrimeDataProductProcessor:
         try:
             data = self.in_bucket.download_object(info.name)
         except Exception as exc:
-            # Kept in _seen: the object is retried only when it is re-created
-            logger.warning("Download of %s failed, skipped: %s", info.name, exc)
+            attempts = self._download_failures.get(info.name, 0) + 1
+            self._download_failures[info.name] = attempts
+            if attempts < DOWNLOAD_ATTEMPTS:
+                self._seen.pop(info.name, None)  # retried on the next poll
+            logger.warning("Download of %s failed (attempt %d/%d): %s", info.name, attempts, DOWNLOAD_ATTEMPTS, exc)
             return False
+        self._download_failures.pop(info.name, None)
         received = utc_iso(info.created) if info.created else utc_iso()
-        return self.catalog.consider(info.name, data, received=received, from_scan=from_scan,
-                                     existing_json=self._existing_json if from_scan else None)
+        listed = self.catalog.consider(info.name, data, received=received, from_scan=from_scan,
+                                       existing_json=self._existing_json if from_scan else None)
+        if not listed and info.name.lower().endswith(".fdp"):
+            logger.info("Object %s is not a valid data product, ignored", info.name)
+        return listed
 
     def scan(self, from_scan: bool) -> int:
-        """List the downlink bucket and consider every new or re-created object (oldest first)"""
+        """List the downlink bucket, consider every new or re-created object (oldest first), drop vanished ones"""
         try:
             objects = list(self.in_bucket.list_objects().objects)
         except Exception as exc:
             logger.warning("Listing bucket %s failed: %s", self.in_bucket_name, exc)
             return 0
-        objects.sort(key=lambda info: info.created or 0)
+        objects.sort(key=lambda info: info.created.timestamp() if info.created else 0.0)
         count = 0
         for info in objects:
             if self._consider_object(info, from_scan):
                 count += 1
+        present = {info.name for info in objects}
+        for name in [name for name in self._seen if name not in present]:
+            self._seen.pop(name, None)
+            self._download_failures.pop(name, None)
+            self.catalog.forget(name)
         return count
 
     # ------------------------------------------------------------------ control objects written by the page
 
-    def _handle_requests(self):
+    def _handle_control(self):
+        """Apply and delete the control objects written by the page (one bucket listing per poll)"""
         try:
-            listing = self.out_bucket.list_objects(prefix=REQUEST_PREFIX)
+            objects = list(self.out_bucket.list_objects().objects)
         except Exception as exc:
-            logger.warning("Listing requests failed: %s", exc)
+            logger.warning("Listing bucket %s failed: %s", self.out_bucket_name, exc)
             return
-        for info in listing.objects:
-            name = info.name[len(REQUEST_PREFIX):]
-            try:
-                state = self.catalog.request_decode(name)
-                logger.info("Decode requested for %s: %s", name, state)
-            except UnknownProduct:
-                logger.warning("Decode requested for unknown product %s", name)
-            except DecodeQueueFull:
-                logger.warning("Decode queue full, request for %s dropped", name)
-            self._delete_quietly(info.name)
-
-    def _handle_settings(self):
-        try:
-            listing = self.out_bucket.list_objects(prefix=SETTING_PREFIX)
-        except Exception as exc:
-            logger.warning("Listing settings failed: %s", exc)
-            return
-        for info in listing.objects:
-            if info.name == AUTO_DECODE_SETTING:
-                try:
-                    value = self.out_bucket.download_object(info.name).decode("utf-8", "replace").strip().lower()
-                except Exception as exc:
-                    logger.warning("Reading %s failed: %s", info.name, exc)
-                    continue
-                if value in ("true", "false"):
-                    self.catalog.set_auto_decode(value == "true")
-                    logger.info("Auto-decode %s", "enabled" if value == "true" else "disabled")
+        for info in objects:
+            if info.name.startswith(REQUEST_PREFIX):
+                name = info.name[len(REQUEST_PREFIX):]
+                if ".." in pathlib.PurePosixPath(name).parts:
+                    logger.warning("Ignoring unsafe decode request %r", name)
                 else:
-                    logger.warning("Ignoring auto_decode setting %r", value)
-            self._delete_quietly(info.name)
+                    try:
+                        logger.info("Decode requested for %s: %s", name, self.catalog.request_decode(name))
+                    except UnknownProduct:
+                        logger.warning("Decode requested for unknown product %s", name)
+                    except DecodeQueueFull:
+                        logger.warning("Decode queue full, request for %s dropped", name)
+                self._delete_quietly(info.name)
+            elif info.name.startswith(SETTING_PREFIX):
+                if info.name == AUTO_DECODE_SETTING:
+                    self._apply_auto_decode(info.name)
+                self._delete_quietly(info.name)
+
+    def _apply_auto_decode(self, object_name: str):
+        try:
+            value = self.out_bucket.download_object(object_name).decode("utf-8", "replace").strip().lower()
+        except Exception as exc:
+            logger.warning("Reading %s failed: %s", object_name, exc)
+            return
+        if value in ("true", "false"):
+            self.catalog.set_auto_decode(value == "true")
+            logger.info("Auto-decode %s", "enabled" if value == "true" else "disabled")
+        else:
+            logger.warning("Ignoring auto_decode setting %r", value)
 
     def _publish_catalog(self, force: bool = False):
         revision = self.catalog.revision
@@ -177,19 +203,20 @@ class FPrimeDataProductProcessor:
         if not force and revision == self._published_revision and now - self._published_at < LIVENESS_PERIOD:
             return
         snapshot = self.catalog.snapshot()
+        snapshot["processor"] = {"last_error": self._last_error, "poll_period": POLL_PERIOD}
         body = json.dumps(snapshot, indent=1).encode("utf-8")
         try:
             self.out_bucket.upload_object(CATALOG_OBJECT, io.BytesIO(body), content_type="application/json")
             self._published_revision = snapshot["revision"]
             self._published_at = now
         except Exception as exc:
+            self._last_error = f"publishing {CATALOG_OBJECT} failed: {exc}"
             logger.warning("Publishing %s failed: %s", CATALOG_OBJECT, exc)
 
     # ------------------------------------------------------------------ main loop
 
     def start(self):
         """Startup scan, then poll the buckets forever"""
-        self._ensure_buckets()
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._published_json_names = set()
         try:
@@ -214,8 +241,7 @@ class FPrimeDataProductProcessor:
         while True:
             try:
                 self.scan(from_scan=False)
-                self._handle_requests()
-                self._handle_settings()
+                self._handle_control()
                 self._publish_catalog()
             except Exception:
                 logger.exception("Data product processor loop error")

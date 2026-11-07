@@ -96,7 +96,7 @@ def test_junk_and_bad_header_crc_are_rejected(catalog, data):
 def test_unknown_container_is_listed_without_name(catalog):
     assert catalog.consider("unknown.fdp", make_dp(container_id=0x999))
     (entry,) = catalog.list()
-    assert entry["container"] is None and entry["json_name"] == "unknown.json"
+    assert entry["container"] is None and entry["json_name"] == "unknown.fdp.json"
 
 
 def test_manual_decode_writes_json_and_publishes(catalog):
@@ -171,3 +171,74 @@ def test_disabled_without_containers(tmp_path):
     assert not cat.consider("a.fdp", make_dp())
     cat.set_auto_decode(True)
     assert cat.snapshot()["enabled"] is False and cat.snapshot()["auto_decode"] is False
+
+
+def test_same_basename_in_two_directories_are_separate_products(catalog):
+    assert catalog.consider("a/Dp.fdp", make_dp(seconds=SECONDS))
+    assert catalog.consider("b/Dp.fdp", make_dp(seconds=SECONDS + 1, priority=9))
+    catalog.request_decode("a/Dp.fdp")
+    catalog.decode_next(block=False)
+    a_json = json.loads((catalog.directory / dp_json_filename("DpDemoContainer", SECONDS, USECONDS)).read_text())
+    assert a_json["Header"]["Time"]["seconds"] == SECONDS and a_json["Header"]["Priority"]["value"] == 3
+    assert (catalog.objects_dir / "a" / "Dp.fdp").exists() and (catalog.objects_dir / "b" / "Dp.fdp").exists()
+
+
+def test_unsafe_object_names_are_ignored(catalog):
+    assert not catalog.consider("../escape.fdp", make_dp())
+    assert not catalog.consider("a/../../escape.fdp", make_dp())
+    assert catalog.list() == []
+
+
+def test_duplicate_product_shares_json_without_retry(catalog):
+    catalog.consider("one.fdp", make_dp())
+    catalog.request_decode("one.fdp")
+    catalog.decode_next(block=False)
+    catalog.consider("copy.fdp", make_dp())
+    states = {e["name"]: e["state"] for e in catalog.list()}
+    assert states == {"one.fdp": "DECODED", "copy.fdp": "DUPLICATE"}
+    assert catalog.request_decode("copy.fdp") == "DUPLICATE"
+    assert not catalog.decode_next(block=False)
+
+
+def test_complete_product_is_not_flagged_incomplete(catalog):
+    assert catalog.consider("ok.fdp", make_dp())
+    (entry,) = catalog.list()
+    assert entry["incomplete"] is False
+    assert catalog.request_decode("ok.fdp") == "QUEUED"
+
+
+def test_forget_and_non_product_replacement_drop_entries_and_json(catalog):
+    catalog.consider("x.fdp", make_dp())
+    catalog.request_decode("x.fdp")
+    catalog.decode_next(block=False)
+    json_name = dp_json_filename("DpDemoContainer", SECONDS, USECONDS)
+    assert (catalog.directory / json_name).exists()
+    assert catalog.forget("x.fdp")
+    assert catalog.list() == [] and not (catalog.directory / json_name).exists()
+    assert not catalog.forget("x.fdp")
+    catalog.consider("y.fdp", make_dp())
+    assert not catalog.consider("y.fdp", b"not a product any more" * 8)
+    assert catalog.list() == []
+
+
+def test_eviction_unpublishes_decoded_json(tmp_path):
+    removed = []
+    cat = DataProductCatalog(fake_dictionaries(), tmp_path, catalog_limit=1, unpublisher=removed.append)
+    cat.consider("0.fdp", make_dp(seconds=SECONDS))
+    cat.request_decode("0.fdp")
+    cat.decode_next(block=False)
+    cat.consider("1.fdp", make_dp(seconds=SECONDS + 1))
+    assert [e["name"] for e in cat.list()] == ["1.fdp"]
+    assert removed == [dp_json_filename("DpDemoContainer", SECONDS, USECONDS)]
+
+
+def test_queue_full_rollback_is_published(catalog):
+    for i in range(3):
+        catalog.consider(f"{i}.fdp", make_dp(seconds=SECONDS + i))
+    catalog.request_decode("0.fdp")
+    catalog.request_decode("1.fdp")
+    before = catalog.revision
+    with pytest.raises(DecodeQueueFull):
+        catalog.request_decode("2.fdp")
+    assert catalog.revision > before
+    assert catalog.list()[2]["error"] == "decode queue full"

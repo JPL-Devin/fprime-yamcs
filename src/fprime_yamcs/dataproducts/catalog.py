@@ -61,6 +61,7 @@ class DecodeState(str, enum.Enum):
     DECODING = "DECODING"
     DECODED = "DECODED"
     FAILED = "FAILED"
+    DUPLICATE = "DUPLICATE"  # same product as another listed object; its JSON serves both
 
 
 ACTIVE_STATES = (DecodeState.QUEUED, DecodeState.DECODING)
@@ -89,6 +90,7 @@ class DpEntry:
     state: DecodeState = DecodeState.DETECTED
     error: Optional[str] = None
     generation: int = 0
+    incomplete: bool = False  # shorter than the header's DataSize: never decodable
 
     def to_dict(self) -> dict:
         """Representation published in catalog.json"""
@@ -112,6 +114,7 @@ class DpEntry:
             "state": self.state.value,
             "json_name": self.json_name,
             "error": self.error,
+            "incomplete": self.incomplete,
         }
 
 
@@ -129,16 +132,22 @@ def utc_iso(value=None) -> str:
 class DataProductCatalog:
     """Bounded catalog of data products plus a single decode worker. Thread-safe.
 
-    `directory` is the local working directory: product bytes are written there as <basename> for the decoder and the
-    decoded JSON is written next to them. `publisher(json_name, path)` is called (on the worker thread) with every
-    freshly written JSON; an exception from it marks the product FAILED.
+    `directory` is a private working directory: product bytes are staged under <directory>/objects/<object name> for
+    the decoder and the decoded JSON is written to <directory>/<json_name>. `publisher(json_name, path)` is called (on
+    the worker thread) with every freshly written JSON; an exception from it marks the product FAILED.
+    `unpublisher(json_name)` is called when a decoded product leaves the catalog. Only files the catalog wrote are
+    ever removed.
     """
 
     def __init__(self, dictionaries, directory: pathlib.Path, publisher: Optional[Callable] = None,
-                 catalog_limit: int = CATALOG_LIMIT, queue_limit: int = QUEUE_LIMIT):
+                 catalog_limit: int = CATALOG_LIMIT, queue_limit: int = QUEUE_LIMIT,
+                 unpublisher: Optional[Callable] = None):
         self._dictionaries = dictionaries
         self.directory = pathlib.Path(directory)
+        self.objects_dir = self.directory / "objects"
         self._publisher = publisher
+        self._unpublisher = unpublisher
+        self._generation = 0  # catalog-wide, so a stale queue item never matches a re-created entry
         self._catalog_limit = catalog_limit
         self._entries: "collections.OrderedDict[str, DpEntry]" = collections.OrderedDict()
         self._json_owner: dict = {}  # JSON basename -> entry name, live entries only
@@ -177,8 +186,11 @@ class DataProductCatalog:
     # ------------------------------------------------------------------ detection
 
     def local_path(self, name: str) -> pathlib.Path:
-        """Local working copy of a downlinked object (object names may contain '/')"""
-        return self.directory / pathlib.PurePosixPath(name).name
+        """Staged copy of a downlinked object, keeping its full name so distinct objects never share a file"""
+        parts = [part for part in pathlib.PurePosixPath(name).parts if part not in ("", "/", ".")]
+        if not parts or ".." in parts:
+            raise ValueError(f"unsafe object name {name!r}")
+        return self.objects_dir.joinpath(*parts)
 
     def consider(self, name: str, data: bytes, received: Optional[str] = None, from_scan: bool = False,
                  existing_json: Optional[Callable[[str], Optional[bytes]]] = None) -> bool:
@@ -191,11 +203,18 @@ class DataProductCatalog:
             from_scan: True for the startup scan, which may reuse an existing decoded JSON
             existing_json: callable returning the bytes of an already published JSON of that name, or None
         """
-        if not self._enabled or len(data) < self._header_size:
+        if not self._enabled:
             return False
-        path = self.local_path(name)
+        if len(data) < self._header_size:
+            self._forget_not_product(name)
+            return False
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
+            path = self.local_path(name)
+        except ValueError as exc:
+            logger.warning("Ignoring object: %s", exc)
+            return False
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = path.with_name(path.name + ".tmp")
             with open(tmp_path, "wb") as file_handle:
                 file_handle.write(data)
@@ -206,6 +225,7 @@ class DataProductCatalog:
         header = self._sniff(path)
         if header is None:
             self._remove(path)
+            self._forget_not_product(name)
             return False
         container_id = header["Id"]["value"]
         container = self._dictionaries.dp_container_id.get(container_id)
@@ -213,7 +233,8 @@ class DataProductCatalog:
         time = header["Time"]
         seconds, microseconds = time["seconds"], time["microseconds"]
         data_size = header["DataSize"]["value"]
-        json_name = dp_json_filename(short_name, seconds, microseconds) if short_name else f"{path.stem}.json"
+        # Unknown container: derive the name from the object name, never equal to it (the object could be *.json)
+        json_name = dp_json_filename(short_name, seconds, microseconds) if short_name else f"{path.name}.json"
         entry = DpEntry(
             name=name,
             path=path,
@@ -234,7 +255,8 @@ class DataProductCatalog:
         )
         incomplete = self._header_size + data_size + ChecksumConfig.CHECKSUM_LEN > len(data)
         if incomplete:
-            entry.error = "file shorter than header DataSize"
+            entry.incomplete = True
+            entry.error = "file shorter than header DataSize, not decodable"
         previous_json = None
         if from_scan and not incomplete and existing_json is not None:
             try:
@@ -243,16 +265,18 @@ class DataProductCatalog:
                 logger.debug("Lookup of existing %s failed: %s", json_name, exc)
         with self._lock:
             previous = self._entries.get(name)
-            if previous is not None:
-                entry.generation = previous.generation + 1
-                if self._json_owner.get(previous.json_name) == name:
-                    self._json_owner.pop(previous.json_name)
+            if previous is not None and self._json_owner.get(previous.json_name) == name:
+                self._json_owner.pop(previous.json_name)
+            self._generation += 1
+            entry.generation = self._generation
             self._entries[name] = entry
             self._entries.move_to_end(name)
-            if previous_json is not None:
-                if json_name in self._json_owner:
-                    entry.error = f"output {json_name} already produced by {self._json_owner[json_name]}"
-                elif self._json_matches(previous_json, entry):
+            owner = self._json_owner.get(json_name)
+            if owner is not None and owner != name:
+                entry.state = DecodeState.DUPLICATE
+                entry.error = f"same product as {owner}"
+            elif previous_json is not None:
+                if self._json_matches(previous_json, entry):
                     entry.state = DecodeState.DECODED
                     self._json_owner[json_name] = name
                 else:
@@ -296,16 +320,45 @@ class DataProductCatalog:
             if victim is None:
                 logger.warning("Data product catalog over %d entries, all active", self._catalog_limit)
                 return
-            evicted = self._entries.pop(victim)
-            if self._json_owner.get(evicted.json_name) == victim:
-                self._json_owner.pop(evicted.json_name, None)
-            self._remove(evicted.path)
+            self._drop_locked(victim)
+
+    def _drop_locked(self, name: str):
+        """Remove an entry with everything the catalog produced for it (caller holds the lock)"""
+        dropped = self._entries.pop(name)
+        self._remove(dropped.path)
+        if self._json_owner.get(dropped.json_name) == name:
+            self._json_owner.pop(dropped.json_name, None)
+            self._remove(self.directory / dropped.json_name)
+            if self._unpublisher is not None:
+                try:
+                    self._unpublisher(dropped.json_name)
+                except Exception as exc:
+                    logger.warning("Unpublishing %s failed: %s", dropped.json_name, exc)
+        self._changed_locked()
+
+    def _forget_not_product(self, name: str):
+        """An object listed earlier was re-created with content that is not a data product"""
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is not None and entry.state not in ACTIVE_STATES:
+                self._drop_locked(name)
+                logger.info("Data product %s replaced by a non-product object, dropped", name)
+
+    def forget(self, name: str) -> bool:
+        """Drop a product whose object disappeared from the bucket. Returns True when it was listed."""
+        with self._lock:
+            entry = self._entries.get(name) if self._enabled else None
+            if entry is None or entry.state in ACTIVE_STATES:
+                return False
+            self._drop_locked(name)
+        logger.info("Data product %s removed from the bucket, dropped", name)
+        return True
 
     # ------------------------------------------------------------------ decode requests
 
     def _request_decode_locked(self, entry: DpEntry) -> str:
         """Queue a decode of entry (caller holds the lock). Returns the resulting state name."""
-        if entry.state in ACTIVE_STATES:
+        if entry.state in ACTIVE_STATES or entry.state is DecodeState.DUPLICATE or entry.incomplete:
             return entry.state.value
         previous_state = entry.state
         entry.state = DecodeState.QUEUED
@@ -315,6 +368,7 @@ class DataProductCatalog:
         except queue.Full:
             entry.state = previous_state
             entry.error = "decode queue full"
+            self._changed_locked()
             raise DecodeQueueFull(entry.name)
         self._changed_locked()
         return entry.state.value
@@ -406,8 +460,8 @@ class DataProductCatalog:
                 return
             if self._json_owner.get(json_name) not in (None, name):
                 self._remove(tmp_path)
-                entry.state = DecodeState.FAILED
-                entry.error = f"output {json_name} already produced by {self._json_owner[json_name]}"
+                entry.state = DecodeState.DUPLICATE
+                entry.error = f"same product as {self._json_owner[json_name]}"
                 self._changed_locked()
                 return
             json_path = self.directory / json_name

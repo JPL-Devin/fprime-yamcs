@@ -997,8 +997,12 @@ public class FprimeFilePacketService extends AbstractFileTransferService impleme
         }
 
         // Strip leading "/" from the destination so the bucket sees a relative key.
-        // Bucket object names are relative: "/a/b" and "./a/b" both become "a/b"
-        String objectName = inflight.destinationPath.replaceFirst("^(\\./|/)+", "");
+        // Bucket object names are relative and normalized: "/a/b" and "./a/b" both become "a/b"; ".." is rejected
+        String objectName = java.nio.file.Paths.get("/", inflight.destinationPath).normalize().toString().substring(1);
+        if (objectName.isEmpty() || objectName.equals("..") || objectName.startsWith("../")) {
+            LOG.warn("Rejecting downlink destination outside the bucket root: {}", inflight.destinationPath);
+            return;
+        }
 
         try {
             // putObjectAsync returns a CompletableFuture<Void>; block on it so

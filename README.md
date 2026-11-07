@@ -20,8 +20,9 @@ a `java` command on the `PATH` of the Python environment. On other platforms it 
 
 > [!NOTE]
 > Developers working from a source checkout (rather than a released wheel) still need `mvn`
-> and a JDK 17+ to build the jars: run `./scripts/build-jars.sh` once, or let the launcher
-> fall back to `mvn yamcs:run`. The Maven fallback does not support `--yamcs-plugin-jars`
+> and a JDK 17+ to build the jars: run `./scripts/build-jars.sh && pip install ./packages/bundle .`
+> once (the pinned `fprime-yamcs-bundle` version is only on PyPI after a release), or let the
+> launcher fall back to `mvn yamcs:run`. The Maven fallback does not support `--yamcs-plugin-jars`
 > and does not load entry-point discovered plugin jars.
 
 ## Usage
@@ -70,11 +71,13 @@ Telemetry flow is detected from the selected processor's TM statistics stream (r
 
 ## fprime-yamcs-dataproducts: Data Product Catalog
 
-`fprime-yamcs-dataproducts` watches the `fprimeFilesIn` bucket where completed F Prime file downlinks land, recognizes [data products](https://fprime.jpl.nasa.gov/latest/docs/user-manual/data-products/) by their CRC-validated binary header (not by file name), and publishes a catalog of them to the `fprimeDataProducts` bucket together with the decoded JSON (`<ContainerShortName>_<sec>_<usec>.json`, the `fprime-gds` naming). Decoding reuses the `fprime-gds` data product decoder and runs on one background worker with a bounded queue; the catalog keeps the newest 1000 products. It is launched automatically by `fprime-yamcs`; run it directly when operating YAMCS without the full launcher.
+`fprime-yamcs-dataproducts` watches the `fprimeFilesIn` bucket where completed F Prime file downlinks land, recognizes [data products](https://fprime.jpl.nasa.gov/latest/docs/user-manual/data-products/) by their CRC-validated binary header (not by file name), and publishes a catalog of them to the `fprimeDataProducts` bucket together with the decoded JSON (`<ContainerShortName>_<sec:08d>_<usec:08d>.json`, the `fprime-gds` naming). Decoding reuses the `fprime-gds` data product decoder and runs on one background worker with a bounded queue; the catalog keeps the newest products up to the output bucket's object limit (YAMCS default 1000) and removes their JSON when they age out. Staged copies live in a private working directory (`--work-dir`, default `$FPRIME_DOWNLINK_DIR/.dataproducts` or a temp directory). It is launched automatically by `fprime-yamcs` as a bundled `ProcessRunner` service; run it directly when operating YAMCS without the full launcher.
 
 ### F´ Data Products Web Display
 
-The YAMCS web interface gains an **F´ Data Products** page (sidebar item, served at `/ext/fprime-dataproducts`) listing every downlinked data product with its container name translated from the dictionary, container ID, header timestamp, priority, size and decode state. Each row has a **Decode** button (then **Re-decode** / **Retry**), an **Open JSON** link once decoded, and a link to the raw `.fdp` object. An **Auto-decode new products** toggle (off by default, server-side) decodes every product as it arrives. The page talks to the processor through the `fprimeDataProducts` bucket (`catalog.json`, `requests/<name>`, `settings/auto_decode`), so no additional YAMCS service or configuration is required.
+The YAMCS web interface gains an **F´ Data Products** page (sidebar item, served at `/ext/fprime-dataproducts?c=<instance>__realtime`) listing every downlinked data product with its file name, container name translated from the dictionary, container ID, header timestamp, priority, size and decode state. Each row has a **Decode** button (then **Re-decode** / **Retry**), an **Open JSON** link once decoded, and a link to the raw `.fdp` object; a second downlink of the same product is listed as **DUPLICATE** and shares the JSON. An **Auto-decode new products** toggle (off by default, server-side) decodes every product as it arrives. The page talks to the processor through the `fprimeDataProducts` bucket (`catalog.json`, `requests/<name>`, `settings/auto_decode`), so no extra YAMCS configuration is required.
+
+Products reach YAMCS only when the flight software downlinks them. On the `Ref` deployment: send `Ref.dpDemo.Dp` (`reqType` IMMEDIATE, any priority, `proc` PROC_TYPE_NONE) to write a product, then `dpCat.BUILD_CATALOG` followed by `dpCat.START_XMIT_CATALOG` to downlink the catalog's files; they appear on the page within a few seconds.
 
 ## Communication Bridge: fprime-comm-bridge
 
