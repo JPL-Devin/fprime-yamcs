@@ -94,7 +94,7 @@ const PAGE_STYLE = `
     color: #c82333;
   }
   td.fp-file {
-    max-width: 170px;
+    max-width: 150px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -154,7 +154,12 @@ export function displayTime(time) {
     return dpTime(time);
   }
   const date = new Date(time.seconds * 1000 + Math.floor(time.microseconds / 1000));
-  return isNaN(date) ? dpTime(time) : date.toISOString();
+  return isNaN(date) ? dpTime(time) : compactIso(date);
+}
+
+/** "YYYY-MM-DD hh:mm:ss" UTC (the full ISO form stays in the tooltip) */
+export function compactIso(date) {
+  return date.toISOString().slice(0, 19).replace("T", " ");
 }
 
 /** Label of the decode button for a product state, or null while a decode is queued or running */
@@ -409,7 +414,7 @@ class FprimeDataProductsElement extends HTMLElement {
       return td;
     };
     const received = new Date(product.received);
-    cell(isNaN(received) ? product.received : received.toISOString());
+    cell(isNaN(received) ? product.received : compactIso(received), null, product.received);
     cell(displayTime(product.time), null, `raw ${dpTime(product.time)}, time base ${product.time.base}`);
     cell(baseName(product.name), "fp-file", product.name);
     cell(product.short_name || "unknown", null, product.container || `container id ${product.container_id} not in dictionary`);
