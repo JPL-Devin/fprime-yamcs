@@ -23,6 +23,7 @@ YAMCS_URL = "http://127.0.0.1:8090"
 WEB_EXTENSION_SCRIPTS = {
     "fprime-events.js": "fprime-events",
     "fprime-dataflow.js": "fprime-dataflow-orb",
+    "fprime-dataproducts.js": "fprime-dataproducts",
 }
 
 

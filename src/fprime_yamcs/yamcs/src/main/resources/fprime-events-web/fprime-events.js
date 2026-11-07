@@ -602,12 +602,25 @@ class FprimeEventsElement extends HTMLElement {
   }
 }
 
+// yamcs-web hands the same service to the initializer more than once; register once per service
+const registeredServices = new WeakSet();
+
 class FprimeYamcsInitializer extends HTMLElement {
   set extensionService(service) {
+    if (registeredServices.has(service)) {
+      return;
+    }
+    registeredServices.add(service);
     service.addNavItem("archive", {
       path: "ext/fprime-events",
       label: "F´ Events",
       icon: "event_note",
+    });
+    // The page itself is defined in fprime-dataproducts.js
+    service.addNavItem("archive", {
+      path: "ext/fprime-dataproducts",
+      label: "F´ Data Products",
+      icon: "inventory_2",
     });
     // Mount the GDS-style data-flow orb (defined in fprime-dataflow.js);
     // whenDefined guards against script load-order differences

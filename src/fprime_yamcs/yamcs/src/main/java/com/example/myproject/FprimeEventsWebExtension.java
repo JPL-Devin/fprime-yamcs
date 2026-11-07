@@ -15,7 +15,8 @@ import org.yamcs.YamcsServer;
 import org.yamcs.web.WebPlugin;
 
 /**
- * Registers the "F Prime Events" web extension with the Yamcs web interface.
+ * Registers the "F Prime Events" web extension (F´ Events and F´ Data Products pages, data-flow orb) with the
+ * Yamcs web interface.
  *
  * The extension provides a GDS-style event display: whole-row severity
  * coloring and filtering on event ID, name, and F Prime severity. Static web
@@ -28,7 +29,8 @@ public class FprimeEventsWebExtension implements Plugin {
     public static final String EXTENSION_ID = "fprime-events";
 
     private static final String RESOURCE_ROOT = "/fprime-events-web/";
-    private static final String[] RESOURCES = { EXTENSION_ID + ".js", "fprime-dataflow.js" };
+    private static final String[] RESOURCES = { EXTENSION_ID + ".js", "fprime-dataflow.js",
+            "fprime-dataproducts.js" };
 
     @Override
     public void onLoad(YConfiguration config) throws PluginException {
