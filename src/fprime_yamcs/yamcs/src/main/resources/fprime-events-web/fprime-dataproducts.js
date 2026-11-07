@@ -16,7 +16,8 @@ const DP_BUCKET = "fprimeDataProducts";
 const FILES_BUCKET = "fprimeFilesIn";
 const CATALOG_OBJECT = "catalog.json";
 const POLL_MS = 2000;
-const PENDING_MS = 5000;
+const PENDING_MS = 5000; // auto-decode checkbox
+const REQUEST_TIMEOUT_MS = 20000; // a decode request the processor has not picked up by then is reported
 const TB_WORKSTATION = 2;
 
 // Dark enough for white 11 px text (WCAG AA)
@@ -194,6 +195,7 @@ class FprimeDataProductsElement extends HTMLElement {
     this._inFlight = false;
     this._lastError = null;
     this._parseError = false;
+    this._requestError = null; // last decode request problem, cleared when a request succeeds
   }
 
   set extensionService(service) {
@@ -257,20 +259,32 @@ class FprimeDataProductsElement extends HTMLElement {
   }
 
   async decode(product) {
-    this._pending.set(product.name, product.state);
+    this._pending.set(product.name, { state: product.state, until: Date.now() + REQUEST_TIMEOUT_MS });
     this.redraw();
     try {
       await this._client.uploadObject(DP_BUCKET, "requests/" + product.name, new Blob([]));
     } catch (err) {
       console.error("fprime-dataproducts: decode request failed", err);
       this._pending.delete(product.name);
+      this._requestError = `decode request for ${baseName(product.name)} failed: ${err.message || err}`;
       this.redraw();
-      return;
     }
-    setTimeout(() => {
-      this._pending.delete(product.name);
-      this.redraw();
-    }, PENDING_MS);
+  }
+
+  /** Pending requests end when the row changed state; an ignored one is reported after REQUEST_TIMEOUT_MS */
+  _settlePending(products) {
+    const now = Date.now();
+    const byName = new Map(products.map((p) => [p.name, p]));
+    for (const [name, pending] of this._pending) {
+      const product = byName.get(name);
+      if (!product || product.state !== pending.state) {
+        this._pending.delete(name);
+        this._requestError = null;
+      } else if (now > pending.until) {
+        this._pending.delete(name);
+        this._requestError = `no response to the decode request for ${baseName(name)}: is the processor running?`;
+      }
+    }
   }
 
   async setAutoDecode(checked) {
@@ -357,8 +371,19 @@ class FprimeDataProductsElement extends HTMLElement {
     }
     this._autoBox.checked = this._autoPending ? this._autoPending.value : !!catalog.auto_decode;
     const products = catalog.products || [];
+    this._settlePending(products);
     const decoded = products.filter((p) => p.state === "DECODED").length;
-    const problem = this._parseError ? "catalog.json is not valid JSON" : catalog.processor && catalog.processor.last_error;
+    const processor = catalog.processor || {};
+    const ageMs = Date.now() - Date.parse(catalog.updated);
+    const staleAfterMs = 3 * (processor.liveness_period || 10) * 1000;
+    let problem = this._parseError ? "catalog.json is not valid JSON" : processor.last_error;
+    if (!problem && ageMs > staleAfterMs) {
+      problem = `processor not responding: catalog last updated ${Math.round(ageMs / 1000)} s ago`;
+      this._requestError = null;
+    }
+    if (!problem && this._requestError) {
+      problem = this._requestError;
+    }
     this._status.className = problem ? "fp-status fp-warn" : "fp-status";
     this._status.textContent = (catalog.enabled
       ? `${products.length} products, ${decoded} decoded, queue ${catalog.queue.size}/${catalog.queue.limit}`
@@ -380,7 +405,7 @@ class FprimeDataProductsElement extends HTMLElement {
     for (let i = products.length - 1; i >= 0; i--) {
       const product = products[i];
       live.add(product.name);
-      const signature = JSON.stringify(product) + "|" + (this._pending.get(product.name) || "");
+      const signature = JSON.stringify(product) + "|" + (this._pending.has(product.name) ? "pending" : "");
       let entry = this._rows.get(product.name);
       if (!entry || entry.signature !== signature) {
         const row = this.buildRow(product);
@@ -434,7 +459,7 @@ class FprimeDataProductsElement extends HTMLElement {
     if (label) {
       const button = document.createElement("button");
       button.textContent = label;
-      button.disabled = this._pending.get(product.name) === product.state;
+      button.disabled = this._pending.has(product.name);
       button.addEventListener("click", () => this.decode(product));
       actions.appendChild(button);
     }

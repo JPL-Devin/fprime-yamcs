@@ -148,6 +148,8 @@ class DataProductCatalog:
         self._publisher = publisher
         self._unpublisher = unpublisher
         self._generation = 0  # catalog-wide, so a stale queue item never matches a re-created entry
+        self._failed_path = self.directory / "failed.json"  # decode failures survive a processor restart
+        self._failed = self._load_failed()
         self._catalog_limit = catalog_limit
         self._entries: "collections.OrderedDict[str, DpEntry]" = collections.OrderedDict()
         self._json_owner: dict = {}  # JSON basename -> entry name, live entries only
@@ -182,6 +184,34 @@ class DataProductCatalog:
 
     def _changed_locked(self):
         self._revision += 1
+        self._sync_failed_locked()
+
+    def _load_failed(self) -> dict:
+        try:
+            with open(self._failed_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            return loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _sync_failed_locked(self):
+        """Keep failed.json equal to the FAILED entries (an entry that left FAILED, or the catalog, is dropped)"""
+        failed = dict(self._failed)
+        for name, entry in self._entries.items():
+            if entry.state == DecodeState.FAILED:
+                failed[name] = {"error": entry.error, "file_size": entry.file_size}
+            else:
+                failed.pop(name, None)
+        if failed != self._failed:
+            self._failed = failed
+            try:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                tmp = self._failed_path.with_suffix(".tmp")
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(failed, handle)
+                os.replace(tmp, self._failed_path)
+            except OSError as exc:
+                logger.warning("Writing %s failed: %s", self._failed_path, exc)
 
     # ------------------------------------------------------------------ detection
 
@@ -275,6 +305,8 @@ class DataProductCatalog:
             if owner is not None and owner != name:
                 entry.state = DecodeState.DUPLICATE
                 entry.error = f"same product as {owner}"
+            elif from_scan and not incomplete and self._failed.get(name, {}).get("file_size") == entry.file_size:
+                entry.state, entry.error = DecodeState.FAILED, self._failed[name]["error"]
             elif previous_json is not None:
                 if self._json_matches(previous_json, entry):
                     entry.state = DecodeState.DECODED
@@ -320,11 +352,13 @@ class DataProductCatalog:
             if victim is None:
                 logger.warning("Data product catalog over %d entries, all active", self._catalog_limit)
                 return
+            logger.info("Data product catalog full (%d), evicting oldest %s", self._catalog_limit, victim)
             self._drop_locked(victim)
 
     def _drop_locked(self, name: str):
         """Remove an entry with everything the catalog produced for it (caller holds the lock)"""
         dropped = self._entries.pop(name)
+        self._failed.pop(name, None)
         self._remove(dropped.path)
         if self._json_owner.get(dropped.json_name) == name:
             self._json_owner.pop(dropped.json_name, None)
@@ -334,6 +368,16 @@ class DataProductCatalog:
                     self._unpublisher(dropped.json_name)
                 except Exception as exc:
                     logger.warning("Unpublishing %s failed: %s", dropped.json_name, exc)
+            # the first copy that was waiting behind the owner becomes decodable again
+            successor = next((e for e in self._entries.values()
+                              if e.json_name == dropped.json_name and e.state is DecodeState.DUPLICATE), None)
+            if successor is not None:
+                successor.state, successor.error = DecodeState.DETECTED, None
+                if self._auto_decode and not successor.incomplete:
+                    try:
+                        self._request_decode_locked(successor)
+                    except DecodeQueueFull:
+                        pass  # caught up later
         self._changed_locked()
 
     def _forget_not_product(self, name: str):
@@ -382,13 +426,27 @@ class DataProductCatalog:
             return self._request_decode_locked(entry)
 
     def set_auto_decode(self, value: bool):
-        """Set the auto-decode flag (ignored when disabled). Existing entries are not caught up."""
+        """Set the auto-decode flag (ignored when disabled). Enabling it queues the DETECTED backlog, oldest first."""
         if not self._enabled:
             return
         with self._lock:
             if self._auto_decode != bool(value):
                 self._auto_decode = bool(value)
+                self._catch_up_locked()
                 self._changed_locked()
+
+    def _catch_up_locked(self):
+        """With auto-decode on, queue DETECTED products (never-tried or left over from a full queue) while there is room"""
+        if not self._auto_decode:
+            return
+        for entry in self._entries.values():
+            if self._queue.full():
+                return
+            if entry.state is DecodeState.DETECTED and not entry.incomplete:
+                try:
+                    self._request_decode_locked(entry)
+                except DecodeQueueFull:
+                    return
 
     def list(self) -> list:
         """Products as plain dicts, oldest first"""
@@ -433,6 +491,8 @@ class DataProductCatalog:
             self._decode_one(name, generation)
         finally:
             self._queue.task_done()
+        with self._lock:
+            self._catch_up_locked()
         return True
 
     def _decode_one(self, name: str, generation: int):

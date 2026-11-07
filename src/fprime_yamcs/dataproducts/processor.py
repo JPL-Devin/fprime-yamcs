@@ -34,7 +34,7 @@ REQUEST_PREFIX = "requests/"
 SETTING_PREFIX = "settings/"
 AUTO_DECODE_SETTING = SETTING_PREFIX + "auto_decode"
 POLL_PERIOD = 2.0
-LIVENESS_PERIOD = 30.0
+LIVENESS_PERIOD = 10.0
 DOWNLOAD_ATTEMPTS = 3
 BUCKET_HEADROOM = 20  # objects kept free in the output bucket for catalog.json and control objects
 
@@ -203,7 +203,8 @@ class FPrimeDataProductProcessor:
         if not force and revision == self._published_revision and now - self._published_at < LIVENESS_PERIOD:
             return
         snapshot = self.catalog.snapshot()
-        snapshot["processor"] = {"last_error": self._last_error, "poll_period": POLL_PERIOD}
+        snapshot["processor"] = {"last_error": self._last_error, "poll_period": POLL_PERIOD,
+                                 "liveness_period": LIVENESS_PERIOD}
         body = json.dumps(snapshot, indent=1).encode("utf-8")
         try:
             self.out_bucket.upload_object(CATALOG_OBJECT, io.BytesIO(body), content_type="application/json")

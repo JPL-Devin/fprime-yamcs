@@ -111,13 +111,41 @@ def test_manual_decode_writes_json_and_publishes(catalog):
     assert not catalog.decode_next(block=False)
 
 
-def test_auto_decode_queues_new_products_only_when_enabled(catalog):
+def test_auto_decode_queues_new_products_and_the_detected_backlog(catalog):
     catalog.consider("off.fdp", make_dp())
+    assert catalog.list()[0]["state"] == DecodeState.DETECTED.value
     catalog.set_auto_decode(True)
     assert catalog.auto_decode
     catalog.consider("on.fdp", make_dp(seconds=SECONDS + 1))
     states = {e["name"]: e["state"] for e in catalog.list()}
-    assert states == {"off.fdp": DecodeState.DETECTED.value, "on.fdp": DecodeState.QUEUED.value}
+    assert states == {"off.fdp": DecodeState.QUEUED.value, "on.fdp": DecodeState.QUEUED.value}
+
+
+def test_auto_decode_catches_up_products_left_behind_by_a_full_queue(tmp_path):
+    catalog = DataProductCatalog(fake_dictionaries(), tmp_path, queue_limit=1)
+    catalog.set_auto_decode(True)
+    for i in range(3):
+        catalog.consider(f"p{i}.fdp", make_dp(seconds=SECONDS + i))
+    states = [e["state"] for e in catalog.list()]
+    assert states == [DecodeState.QUEUED.value, DecodeState.DETECTED.value, DecodeState.DETECTED.value]
+    while catalog.decode_next(block=False):
+        pass
+    assert all(e["state"] == DecodeState.DECODED.value for e in catalog.list())
+
+
+def test_duplicate_becomes_decodable_when_its_owner_is_removed(catalog):
+    catalog.consider("a/Dp.fdp", make_dp())
+    catalog.request_decode("a/Dp.fdp")
+    catalog.decode_next(block=False)
+    catalog.consider("b/Dp.fdp", make_dp())
+    states = {e["name"]: e["state"] for e in catalog.list()}
+    assert states == {"a/Dp.fdp": DecodeState.DECODED.value, "b/Dp.fdp": DecodeState.DUPLICATE.value}
+    assert catalog.forget("a/Dp.fdp")
+    (entry,) = catalog.list()
+    assert entry["state"] == DecodeState.DETECTED.value and entry["error"] is None
+    assert catalog.request_decode("b/Dp.fdp") == DecodeState.QUEUED.value
+    catalog.decode_next(block=False)
+    assert catalog.list()[0]["state"] == DecodeState.DECODED.value
 
 
 def test_decode_failure_is_reported_and_retryable(catalog):
@@ -242,3 +270,21 @@ def test_queue_full_rollback_is_published(catalog):
         catalog.request_decode("2.fdp")
     assert catalog.revision > before
     assert catalog.list()[2]["error"] == "decode queue full"
+
+
+def test_failed_state_survives_restart(tmp_path):
+    first = DataProductCatalog(fake_dictionaries(), tmp_path)
+    bad = bytearray(make_dp())
+    bad[-1] ^= 0xFF  # corrupt the data checksum so the decode fails
+    first.consider("bad.fdp", bytes(bad))
+    first.request_decode("bad.fdp")
+    first.decode_next(block=False)
+    (entry,) = first.list()
+    assert entry["state"] == "FAILED" and entry["error"]
+    second = DataProductCatalog(fake_dictionaries(), tmp_path)
+    second.consider("bad.fdp", bytes(bad), from_scan=True, existing_json=lambda name: None)
+    (restored,) = second.list()
+    assert restored["state"] == "FAILED" and restored["error"] == entry["error"]
+    assert second.request_decode("bad.fdp") == "QUEUED"
+    second.consider("bad.fdp", make_dp())  # re-created as a good file: no longer failed
+    assert second.list()[0]["state"] == "DETECTED" and not (tmp_path / "failed.json").read_text().strip("{} \n")
